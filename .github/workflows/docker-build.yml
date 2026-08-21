@@ -62,15 +62,18 @@ jobs:
 
       # 把 GHCR 镜像包设为公开（源码仓库仍保持私有，魔塔无需凭据即可拉取）
       - name: Make package public
+        env:
+          GH_TOKEN_GITHUB: "${{ github.token }}"
         run: |
           set -e
-          echo "=== 列出本用户所有容器包 ==="
-          gh api "/user/packages?package_type=container" --jq '.[] | "\(.name) / visibility=\(.visibility) / owner=\(.owner.login)"' || echo "LIST_FAILED"
-          PKG=$(gh api "/user/packages?package_type=container" --jq -r '.[0].name')
-          echo "检测到包名: $PKG"
-          echo "=== 设为公开 ==="
+          export GH_TOKEN="${GH_TOKEN_GITHUB}"
           for i in 1 2 3 4 5 6; do
             echo "attempt=$i"
-            gh api -X PATCH "/user/packages/container/${PKG}" -f visibility=public --jq '"visibility="+.visibility' && break
+            echo "--- 列出容器包 ---"
+            gh api -X GET "/user/packages?package_type=container&per_page=100" --jq '.[].name' 2>&1 || true
+            echo "--- 尝试 PATCH 设为公开 ---"
+            gh api -X PATCH "/user/packages/container/turb-gpt-free-register" -f visibility=public --jq '"visibility="+.visibility' && exit 0
             sleep 15
           done
+          echo "FAILED to make public"
+          exit 1
