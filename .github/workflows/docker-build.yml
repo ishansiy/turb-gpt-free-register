@@ -60,12 +60,25 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 把 GHCR 镜像设为公开（源码仓库仍可保持私有，魔塔无需凭据即可拉取）
-      - name: Make package public
+      # 把 GHCR 镜像包设为公开（源码仓库仍保持私有，魔塔无需凭据即可拉取）
+      - name: Update package visibility
+        env:
+          GH_AUTH: "${{ github.token }}"
         run: |
-          curl -sS -X PATCH \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/user/packages/container/turb-gpt-free-register \
-            -d '{"visibility":"public"}' | head -c 500
-          echo ""
+          set -e
+          for i in 1 2 3 4 5 6; do
+            echo "attempt=$i"
+            resp=$(curl -sS -X PATCH \
+              -H "Authorization: Bearer ${{ github.token }}" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/user/packages/container/turb-gpt-free-register \
+              -d '{"visibility":"public"}')
+            echo "$resp"
+            if echo "$resp" | grep -q '"visibility":"public"'; then
+              echo "VISIBILITY_OK"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "FAILED to make public"
+          exit 1
