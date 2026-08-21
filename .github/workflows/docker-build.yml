@@ -59,3 +59,13 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # 把 GHCR 镜像设为公开（源码仓库仍可保持私有，魔塔无需凭据即可拉取）
+      - name: Make package public
+        run: |
+          curl -sS -X PATCH \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/user/packages/container/turb-gpt-free-register \
+            -d '{"visibility":"public"}' | head -c 500
+          echo ""
