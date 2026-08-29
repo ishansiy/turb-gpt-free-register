@@ -22,6 +22,18 @@ PORT="${PORT:-7860}"
 HOST="${HOST:-0.0.0.0}"
 echo "[2/3] 配置服务端口: ${HOST}:${PORT}"
 
+# 2.5 启动 l2hero SMS 转译服务（SMS_PROVIDER=l → hero-sms 的本地转译层）
+echo "[2.5/3] 启动 l2hero SMS 转译服务 (127.0.0.1:8799)..."
+if ! pgrep -f "python.*l2hero/server.py" >/dev/null 2>&1; then
+    python /app/l2hero/server.py >>/tmp/l2hero.log 2>&1 &
+    sleep 1
+fi
+if curl -sf -o /dev/null --max-time 3 http://127.0.0.1:8799/health; then
+    echo "✓ l2hero 就绪"
+else
+    echo "⚠ l2hero 未就绪（SMS 手机验证将不可用），日志: /tmp/l2hero.log"
+fi
+
 # 3. 启动 WebUI
 echo "[3/3] 启动 WebUI 服务..."
 exec python web.py --host "${HOST}" --port "${PORT}"
