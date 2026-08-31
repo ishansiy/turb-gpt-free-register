@@ -5,47 +5,53 @@ echo "=================================================="
 echo "🚀 启动 Turb GPT Free Register (ModelScope Studio)"
 echo "=================================================="
 
-# 0. 持久化目录软链与恢复 (/mnt/workspace)
-# ModelScope 创空间持久盘挂载在 /mnt/workspace
+# 0. 持久化数据目录与安全恢复 (/mnt/workspace)
+# ModelScope 创空间持久盘挂载在 /mnt/workspace (基于 OSSFS)
 PERSIST_DIR="/mnt/workspace/turb-gpt-data"
 if [ -d "/mnt/workspace" ]; then
     echo "[0/3] 初始化 /mnt/workspace 持久化数据目录..."
-    mkdir -p "${PERSIST_DIR}"
-    mkdir -p "${PERSIST_DIR}/注册日志"
-    mkdir -p "${PERSIST_DIR}/codex_accounts"
-    mkdir -p "${PERSIST_DIR}/codex_agent_accounts"
+    mkdir -p "${PERSIST_DIR}" || true
+    mkdir -p "${PERSIST_DIR}/注册日志" || true
+    mkdir -p "${PERSIST_DIR}/codex_accounts" || true
+    mkdir -p "${PERSIST_DIR}/codex_agent_accounts" || true
 
-    # 1) 持久化 .env（配置项）
+    # 1) 配置持久化：启动时从 /mnt/workspace 恢复 .env，后台定时同步回持久盘
     if [ -f "${PERSIST_DIR}/.env" ]; then
         echo "  - 从持久目录恢复 .env 配置"
-        cp -f "${PERSIST_DIR}/.env" /app/.env
-    elif [ -f "/app/.env" ]; then
-        echo "  - 备份初始 /app/.env 到持久目录"
-        cp -f /app/.env "${PERSIST_DIR}/.env"
+        cp -f "${PERSIST_DIR}/.env" /app/.env || true
     fi
-    # 建立软链，后续 WebUI 改写 .env 直接落盘持久目录
-    ln -sf "${PERSIST_DIR}/.env" /app/.env
 
-    # 2) 持久化 turb.sqlite3（账号池、邮箱池、任务历史）
+    # 2) 数据库持久化：SQLite 必须在本地容器文件系统运行，防止 OSSFS 锁冲突；启动恢复 + 退出/定时同步
     if [ -f "${PERSIST_DIR}/turb.sqlite3" ]; then
-        echo "  - 挂载持久化 SQLite 数据库 turb.sqlite3"
-    elif [ -f "/app/turb.sqlite3" ]; then
-        echo "  - 迁移初始 turb.sqlite3 到持久目录"
-        cp -f /app/turb.sqlite3 "${PERSIST_DIR}/turb.sqlite3"
+        echo "  - 从持久目录恢复 SQLite 数据库 turb.sqlite3"
+        cp -f "${PERSIST_DIR}/turb.sqlite3" /app/turb.sqlite3 || true
     fi
-    ln -sf "${PERSIST_DIR}/turb.sqlite3" /app/turb.sqlite3
 
-    # 3) 持久化日志与导出的凭证目录
-    rm -rf /app/注册日志 /app/codex_accounts /app/codex_agent_accounts
-    ln -sf "${PERSIST_DIR}/注册日志" /app/注册日志
-    ln -sf "${PERSIST_DIR}/codex_accounts" /app/codex_accounts
-    ln -sf "${PERSIST_DIR}/codex_agent_accounts" /app/codex_agent_accounts
-    echo "✓ 持久化链接初始化完成"
+    # 3) 日志与凭证软链
+    rm -rf /app/注册日志 /app/codex_accounts /app/codex_agent_accounts || true
+    ln -sf "${PERSIST_DIR}/注册日志" /app/注册日志 || true
+    ln -sf "${PERSIST_DIR}/codex_accounts" /app/codex_accounts || true
+    ln -sf "${PERSIST_DIR}/codex_agent_accounts" /app/codex_agent_accounts || true
+
+    # 4) 后台数据看护同步循环（每 10 秒自动将 .env 和 turb.sqlite3 同步到持久盘）
+    (
+        while true; do
+            sleep 10
+            if [ -f "/app/.env" ]; then
+                cp -f /app/.env "${PERSIST_DIR}/.env" 2>/dev/null || true
+            fi
+            if [ -f "/app/turb.sqlite3" ]; then
+                cp -f /app/turb.sqlite3 "${PERSIST_DIR}/turb.sqlite3" 2>/dev/null || true
+            fi
+        done
+    ) &
+
+    echo "✓ 持久化恢复与看护进程已就绪"
 else
     echo "[0/3] 未检测到 /mnt/workspace，使用容器本地存储"
 fi
 
-# 1. 启动 Xvfb 虚拟显示服务器（供有头浏览器/指纹环境使用）
+# 1. 启动 Xvfb 虚拟显示服务器
 DISPLAY_NUM=99
 echo "[1/3] 检查并启动 Xvfb 虚拟屏幕 :${DISPLAY_NUM} (1920x1080)..."
 if ! pgrep -f "Xvfb :${DISPLAY_NUM}" >/dev/null 2>&1; then
