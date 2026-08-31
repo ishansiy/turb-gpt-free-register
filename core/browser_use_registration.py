@@ -1341,44 +1341,26 @@ def _type_otp(page, code: str) -> None:
 
     start_t = time.time()
     while time.time() - start_t < 15:
-        # 1. 尝试使用 Playwright 6 位分格精准 box.fill(ch)
-        boxes = page.locator("input[maxlength='1'], input[data-index], input[aria-label*='digit' i], input[aria-label*='桁' i], input[aria-label*='code' i]")
+        # 1. 优先探测 6 位分格输入框（OpenAI 核心形态）
+        boxes = page.locator("input[maxlength='1'], input[data-index], input[aria-label*='digit' i], input[aria-label*='桁' i]")
         try:
             count = boxes.count()
         except Exception:
             count = 0
         if count >= len(code):
-            for i, ch in enumerate(code):
+            for i in range(len(code)):
                 box = boxes.nth(i)
                 try:
-                    box.click(timeout=1200)
-                    box.fill(ch, timeout=1200)
-                    _human_pause(0.04, 0.12)
+                    box.click(timeout=1000)
+                    box.fill(code[i], timeout=1000)
+                    _human_pause(0.02, 0.08)
                 except Exception:
                     pass
-            logger.info("[BrowserUse][OTP] Playwright 6 位分格逐格 fill 完成: %s", code)
+            logger.info("[BrowserUse][OTP] Playwright 6 位分格精准填入完成: %s", code)
+            _human_pause(0.2, 0.4)
             return
 
-        # 2. 单输入框 Playwright fill
-        if _fill_first(
-            page,
-            [
-                "input[name='code']",
-                "input[autocomplete='one-time-code']",
-                "input[name='otp']",
-                "input[aria-label*='code' i]",
-                "input[placeholder*='code' i]",
-                "input[inputmode='numeric']",
-            ],
-            code,
-            timeout_ms=1200,
-            typing_delay_range=_cloud_typing_delay("otp"),
-            per_char=False,
-        ):
-            logger.info("[BrowserUse][OTP] 单框 fill 完成: %s", code)
-            return
-
-        # 3. JS 智能填入兜底
+        # 2. JS 智能分发/填入（处理复杂 React 6 格输入）
         try:
             pasted = page.evaluate(r'''(otp) => {
               const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
@@ -1388,21 +1370,10 @@ def _type_otp(page, code: str) -> None:
               const inputs = [...document.querySelectorAll('input')].filter(visible).filter(el => el.type !== 'password' && el.type !== 'hidden');
               if (!inputs.length) return false;
 
-              if (inputs.length === 1) {
-                const el = inputs[0];
-                el.focus();
-                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-                if (setter) setter.call(el, otp); else el.value = otp;
-                el.dispatchEvent(new InputEvent('input', {bubbles:true, data:otp}));
-                el.dispatchEvent(new Event('change', {bubbles:true}));
-                return true;
-              }
-
-              const digits = inputs.filter(el => el.maxLength === 1 || el.getAttribute('inputmode') === 'numeric' || (el.name||'').includes('code') || (el.id||'').includes('code') || el.hasAttribute('data-index'));
-              const targetInputs = digits.length >= otp.length ? digits : inputs;
-              if (targetInputs.length >= otp.length) {
+              const digits = inputs.filter(el => el.maxLength === 1 || (el.name||'').includes('code') || (el.id||'').includes('code') || el.hasAttribute('data-index') || (el.getAttribute('aria-label')||'').includes('桁') || (el.getAttribute('aria-label')||'').includes('digit'));
+              if (digits.length >= otp.length) {
                 for (let i = 0; i < otp.length; i++) {
-                  const el = targetInputs[i];
+                  const el = digits[i];
                   el.focus();
                   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
                   if (setter) setter.call(el, otp[i]); else el.value = otp[i];
@@ -1412,6 +1383,17 @@ def _type_otp(page, code: str) -> None:
                 }
                 return true;
               }
+
+              if (inputs.length === 1 && inputs[0].maxLength !== 1) {
+                const el = inputs[0];
+                el.focus();
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+                if (setter) setter.call(el, otp); else el.value = otp;
+                el.dispatchEvent(new InputEvent('input', {bubbles:true, data:otp}));
+                el.dispatchEvent(new Event('change', {bubbles:true}));
+                return true;
+              }
+
               return false;
             }''', code)
             if pasted:
@@ -1420,6 +1402,16 @@ def _type_otp(page, code: str) -> None:
                 return
         except Exception as exc:
             logger.debug("[BrowserUse][OTP] JS 智能填入异常: %s", exc)
+
+        # 3. 单输入框 Playwright 填入（严格排除 maxlength=1）
+        single_inputs = page.locator("input[name='code'], input[autocomplete='one-time-code'], input[name='otp']").filter(has_not=page.locator("[maxlength='1']"))
+        try:
+            if single_inputs.count() == 1:
+                single_inputs.first.fill(code, timeout=1200)
+                logger.info("[BrowserUse][OTP] 单框 fill 完成: %s", code)
+                return
+        except Exception:
+            pass
 
         time.sleep(0.5)
 
