@@ -1163,7 +1163,8 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
                         logger.info("[BrowserUse] 邮箱验证码页已点击“使用密码继续”：url=%s", quick.get("url") or _page_url(page) or "-")
                         time.sleep(0.4 if _fast_mode() else 1.0)
                         continue
-                    logger.info("[BrowserUse] 已在邮箱验证码页，但未找到“使用密码继续”按钮，继续等待密码页：url=%s", quick.get("url") or _page_url(page) or "-")
+                    logger.info("[BrowserUse] 已在邮箱验证码页，跳过密码页等待，直接进入 OTP 阶段：url=%s", quick.get("url") or _page_url(page) or "-")
+                    return None
         except Exception:
             pass
         if time.time() - last_heartbeat > 3:
@@ -1188,16 +1189,8 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
                 logger.info("[BrowserUse] 邮箱验证码页已点击“使用密码继续”：email=%s", email)
                 time.sleep(0.4 if _fast_mode() else 1.0)
                 continue
-            try:
-                logger.info("[BrowserUse] 邮箱验证码页未命中按钮，直接跳转到密码页兜底：email=%s", email)
-                page.goto("https://auth.openai.com/create-account/password", wait_until="domcontentloaded", timeout=_timeout_ms(getattr(_cfg, "BROWSER_USE_NAVIGATION_TIMEOUT", 90)))
-                time.sleep(0.6 if _fast_mode() else 1.2)
-                continue
-            except Exception as exc:
-                logger.info("[BrowserUse] 邮箱验证码页兜底跳转密码页失败：%s", str(exc)[:180])
-                # 不要直接退出，继续等页面自己切到密码页
-                time.sleep(0.8 if _fast_mode() else 1.5)
-                continue
+            logger.info("[BrowserUse] 邮箱提交已直接进入验证码页，跳过密码设置并直接进入 OTP 阶段：email=%s", email)
+            return None
         if state not in ("password", "login_password"):
             # 提交邮箱后如果仍显示 /auth/login 但页面其实已经渲染验证码输入框，
             # 某些 Browser Use target 上 DOM 状态会短暂滞后。不要在“密码页检测”里长等，
