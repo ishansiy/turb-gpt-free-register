@@ -1341,7 +1341,44 @@ def _type_otp(page, code: str) -> None:
 
     start_t = time.time()
     while time.time() - start_t < 15:
-        # 1. 尝试首框聚焦并整串键入 / 粘贴（React 自动分发 6 位的最佳实践）
+        # 1. 尝试使用 Playwright 6 位分格精准 box.fill(ch)
+        boxes = page.locator("input[maxlength='1'], input[data-index], input[aria-label*='digit' i], input[aria-label*='桁' i], input[aria-label*='code' i]")
+        try:
+            count = boxes.count()
+        except Exception:
+            count = 0
+        if count >= len(code):
+            for i, ch in enumerate(code):
+                box = boxes.nth(i)
+                try:
+                    box.click(timeout=1200)
+                    box.fill(ch, timeout=1200)
+                    _human_pause(0.04, 0.12)
+                except Exception:
+                    pass
+            logger.info("[BrowserUse][OTP] Playwright 6 位分格逐格 fill 完成: %s", code)
+            return
+
+        # 2. 单输入框 Playwright fill
+        if _fill_first(
+            page,
+            [
+                "input[name='code']",
+                "input[autocomplete='one-time-code']",
+                "input[name='otp']",
+                "input[aria-label*='code' i]",
+                "input[placeholder*='code' i]",
+                "input[inputmode='numeric']",
+            ],
+            code,
+            timeout_ms=1200,
+            typing_delay_range=_cloud_typing_delay("otp"),
+            per_char=False,
+        ):
+            logger.info("[BrowserUse][OTP] 单框 fill 完成: %s", code)
+            return
+
+        # 3. JS 智能填入兜底
         try:
             pasted = page.evaluate(r'''(otp) => {
               const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
@@ -1351,7 +1388,6 @@ def _type_otp(page, code: str) -> None:
               const inputs = [...document.querySelectorAll('input')].filter(visible).filter(el => el.type !== 'password' && el.type !== 'hidden');
               if (!inputs.length) return false;
 
-              // 如果是单个完整输入框
               if (inputs.length === 1) {
                 const el = inputs[0];
                 el.focus();
@@ -1362,7 +1398,6 @@ def _type_otp(page, code: str) -> None:
                 return true;
               }
 
-              // 如果是 6 位分格输入框
               const digits = inputs.filter(el => el.maxLength === 1 || el.getAttribute('inputmode') === 'numeric' || (el.name||'').includes('code') || (el.id||'').includes('code') || el.hasAttribute('data-index'));
               const targetInputs = digits.length >= otp.length ? digits : inputs;
               if (targetInputs.length >= otp.length) {
@@ -1385,42 +1420,6 @@ def _type_otp(page, code: str) -> None:
                 return
         except Exception as exc:
             logger.debug("[BrowserUse][OTP] JS 智能填入异常: %s", exc)
-
-        # 2. 单输入框 Playwright 填入
-        if _fill_first(
-            page,
-            [
-                "input[name='code']",
-                "input[autocomplete='one-time-code']",
-                "input[name='otp']",
-                "input[aria-label*='code' i]",
-                "input[placeholder*='code' i]",
-                "input[inputmode='numeric']",
-            ],
-            code,
-            timeout_ms=1200,
-            typing_delay_range=_cloud_typing_delay("otp"),
-            per_char=True,
-        ):
-            return
-
-        # 3. 多分框 Playwright 逐格点击填入
-        boxes = page.locator("input[maxlength='1'], input[data-index], input[aria-label*='digit' i], input[aria-label*='桁' i], input[aria-label*='code' i]")
-        try:
-            count = boxes.count()
-        except Exception:
-            count = 0
-        if count >= len(code):
-            for i, ch in enumerate(code):
-                box = boxes.nth(i)
-                try:
-                    _human_click_locator(box, timeout=1200)
-                    _human_pause(0.04, 0.1)
-                    page.keyboard.type(ch, delay=random.randint(25, 80))
-                except Exception:
-                    raise
-                _human_pause(0.02, 0.08)
-            return
 
         time.sleep(0.5)
 
