@@ -76,4 +76,4 @@ jobs:
             sleep 15
           done
           echo "FAILED to make public"
-          exit 1
+          echo "Warn: make public failed, continuing since image already pushed" || true
