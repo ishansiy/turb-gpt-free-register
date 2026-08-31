@@ -569,11 +569,9 @@ def _quick_auth_state(page) -> dict:
                 qv("input[name='password']") ||
                 qv("input[autocomplete='new-password']");
               let state = 'other';
-              // /log-in/password 代表该邮箱已走登录密码分支；即便页面 DOM 里有 code/otp 字样，
-              // 注册流程也按不可用邮箱处理，不能误判成邮箱验证码页。
               if (url.includes('/log-in/password')) state = 'login_password';
+              else if (hasPassword && !url.includes('email-verification')) state = 'password';
               else if (hasOtp) state = 'email_verification';
-              else if (hasPassword) state = 'password';
               else if (url.includes('about-you') || url.includes('profile') || url.includes('create-account/about')) state = 'profile';
               else if (url.includes('chatgpt.com') && !url.includes('/auth/')) state = 'chatgpt';
               return {state, url, hasOtp, hasPassword, textPreview: text.slice(0, 160)};
@@ -1314,7 +1312,8 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
         while time.time() < wait_end:
             state_after = _quick_auth_state(page)
             state_name = str(state_after.get("state") or "other")
-            if state_name in ("email_verification", "profile", "chatgpt"):
+            url_after = str(state_after.get("url") or "").lower()
+            if (state_name == "email_verification" and not "/password" in url_after) or state_name in ("profile", "chatgpt"):
                 logger.info("[BrowserUse] 密码页提交后已进入后续状态：state=%s url=%s", state_name, state_after.get("url") or "-")
                 return password
             if not retried_submit and state_name == "password" and time.time() > wait_end - (5 if _fast_mode() else 8):
@@ -1347,75 +1346,79 @@ def _type_otp(page, code: str) -> None:
     if not code:
         raise RuntimeError("OTP 为空")
 
-    # 单框
-    if _fill_first(
-        page,
-        [
-            "input[name='code']",
-            "input[autocomplete='one-time-code']",
-            "input[name='otp']",
-            "input[aria-label*='code' i]",
-            "input[placeholder*='code' i]",
-            "input[inputmode='numeric']",
-        ],
-        code,
-        timeout_ms=5000,
-        typing_delay_range=_cloud_typing_delay("otp"),
-        per_char=True,
-    ):
-        return
-
-    # 多分框 6 位
-    boxes = page.locator("input[maxlength='1'], input[data-index], input[aria-label*='digit' i], input[aria-label*='桁' i], input[aria-label*='code' i]")
-    try:
-        count = boxes.count()
-    except Exception:
-        count = 0
-    if count >= len(code):
-        for i, ch in enumerate(code):
-            box = boxes.nth(i)
-            try:
-                _human_click_locator(box, timeout=1200)
-                _human_pause(0.05, 0.14)
-                page.keyboard.type(ch, delay=random.randint(35, 110))
-            except Exception:
-                raise
-            _human_pause(0.04, 0.16)
-        return
-
-    # JS 全局兜底
-    try:
-        js_ok = page.evaluate(r"""
-        (otp) => {
-          const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
-          const inputs = [...document.querySelectorAll('input')].filter(visible);
-          if (inputs.length === 1) {
-            const el = inputs[0];
-            el.focus();
-            el.value = otp;
-            el.dispatchEvent(new Event('input', {bubbles:true}));
-            el.dispatchEvent(new Event('change', {bubbles:true}));
-            return true;
-          }
-          const digits = inputs.filter(el => el.maxLength === 1 || el.getAttribute('inputmode') === 'numeric' || (el.name||'').includes('code'));
-          if (digits.length >= otp.length) {
-            for (let i = 0; i < otp.length; i++) {
-              digits[i].focus();
-              digits[i].value = otp[i];
-              digits[i].dispatchEvent(new Event('input', {bubbles:true}));
-              digits[i].dispatchEvent(new Event('change', {bubbles:true}));
-            }
-            return true;
-          }
-          return false;
-        }
-        """, code)
-        if js_ok:
-            logger.info("[BrowserUse][OTP] JS 智能填入 OTP 成功")
+    # 循环等待 OTP 输入框出现并填入（最多 15 秒）
+    start_t = time.time()
+    while time.time() - start_t < 15:
+        # 单框
+        if _fill_first(
+            page,
+            [
+                "input[name='code']",
+                "input[autocomplete='one-time-code']",
+                "input[name='otp']",
+                "input[aria-label*='code' i]",
+                "input[placeholder*='code' i]",
+                "input[inputmode='numeric']",
+            ],
+            code,
+            timeout_ms=1200,
+            typing_delay_range=_cloud_typing_delay("otp"),
+            per_char=True,
+        ):
             return
-    except Exception as exc:
-        logger.debug("[BrowserUse][OTP] JS 智能填入异常: %s", exc)
 
+        # 多分框 6 位
+        boxes = page.locator("input[maxlength='1'], input[data-index], input[aria-label*='digit' i], input[aria-label*='桁' i], input[aria-label*='code' i]")
+        try:
+            count = boxes.count()
+        except Exception:
+            count = 0
+        if count >= len(code):
+            for i, ch in enumerate(code):
+                box = boxes.nth(i)
+                try:
+                    _human_click_locator(box, timeout=1200)
+                    _human_pause(0.05, 0.14)
+                    page.keyboard.type(ch, delay=random.randint(35, 110))
+                except Exception:
+                    raise
+                _human_pause(0.04, 0.16)
+            return
+
+        # JS 全局兜底
+        try:
+            js_ok = page.evaluate(r"""
+            (otp) => {
+              const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+              const inputs = [...document.querySelectorAll('input')].filter(visible);
+              if (inputs.length === 1 && inputs[0].type !== 'password') {
+                const el = inputs[0];
+                el.focus();
+                el.value = otp;
+                el.dispatchEvent(new Event('input', {bubbles:true}));
+                el.dispatchEvent(new Event('change', {bubbles:true}));
+                return true;
+              }
+              const digits = inputs.filter(el => el.maxLength === 1 || el.getAttribute('inputmode') === 'numeric' || (el.name||'').includes('code'));
+              if (digits.length >= otp.length) {
+                for (let i = 0; i < otp.length; i++) {
+                  digits[i].focus();
+                  digits[i].value = otp[i];
+                  digits[i].dispatchEvent(new Event('input', {bubbles:true}));
+                  digits[i].dispatchEvent(new Event('change', {bubbles:true}));
+                }
+                return true;
+              }
+              return false;
+            }
+            """, code)
+            if js_ok:
+                logger.info("[BrowserUse][OTP] JS 智能填入 OTP 成功")
+                return
+        except Exception as exc:
+            logger.debug("[BrowserUse][OTP] JS 智能填入异常: %s", exc)
+
+        time.sleep(0.5)
     raise RuntimeError("找不到 OTP 输入框")
 
 
