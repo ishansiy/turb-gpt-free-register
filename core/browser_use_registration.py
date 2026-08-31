@@ -1616,23 +1616,40 @@ def _click_resend_otp(page) -> bool:
         return False
 
 
-def _wait_after_otp(page, timeout: int = 12) -> str:
+def _wait_after_otp(page, timeout: int = 14) -> str:
     """返回 accepted / invalid / unknown。"""
     end = time.time() + timeout
     while time.time() < end:
         url = _page_url(page).lower()
-        body = ""
-        try:
-            body = (page.locator("body").inner_text(timeout=1000) or "").lower()
-        except Exception:
-            pass
         if any(x in url for x in ("about-you", "profile", "chatgpt.com", "create-account/about", "signup/profile")):
             return "accepted"
-        if any(x in body for x in ("incorrect", "invalid", "expired", "エラー", "無効", "期限切れ", "错误", "过期", "无效")) and _is_email_verification_page(page):
-            return "invalid"
         if "chatgpt.com" in url and "auth" not in url:
             return "accepted"
-        
+
+        # 检查是否已有 accessToken
+        if _has_chatgpt_access_token(page):
+            return "accepted"
+
+        # 严格检查真正的错误提示元素，避免把页面 disabled 按钮的“無効”文案误判为验证码错误
+        try:
+            has_err = page.evaluate(r'''() => {
+              const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+                && getComputedStyle(el).visibility !== 'hidden'
+                && getComputedStyle(el).display !== 'none';
+              const alerts = [...document.querySelectorAll('[role="alert"], [aria-invalid="true"], [class*="error" i], [class*="alert" i], p[id*="error" i]')].filter(visible);
+              for (const el of alerts) {
+                const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').toLowerCase();
+                if (/incorrect|invalid code|code.*expired|wrong code|認証コードが正しくありません|コードが間違|コードの有効期限|不正确的验证码|验证码错误|验证码已过期/.test(t)) {
+                  return true;
+                }
+              }
+              return false;
+            }''')
+            if has_err and _is_email_verification_page(page):
+                return "invalid"
+        except Exception:
+            pass
+
         # 若仍停留在 email-verification，每隔 2 秒尝试按一次 Enter 或触发一次提交
         if time.time() - end + timeout > 3 and int(time.time()) % 2 == 0:
             try:
@@ -1640,6 +1657,7 @@ def _wait_after_otp(page, timeout: int = 12) -> str:
             except Exception:
                 pass
         time.sleep(0.25 if _fast_mode() else 0.5)
+
     if "email-verification" in _page_url(page).lower():
         return "still_on_otp_page"
     return "unknown"
