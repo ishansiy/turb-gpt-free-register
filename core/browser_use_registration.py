@@ -1366,7 +1366,7 @@ def _type_otp(page, code: str) -> None:
         return
 
     # 多分框 6 位
-    boxes = page.locator("input[maxlength='1'], input[data-index], input[aria-label*='digit' i]")
+    boxes = page.locator("input[maxlength='1'], input[data-index], input[aria-label*='digit' i], input[aria-label*='桁' i], input[aria-label*='code' i]")
     try:
         count = boxes.count()
     except Exception:
@@ -1382,6 +1382,40 @@ def _type_otp(page, code: str) -> None:
                 raise
             _human_pause(0.04, 0.16)
         return
+
+    # JS 全局兜底
+    try:
+        js_ok = page.evaluate(r"""
+        (otp) => {
+          const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+          const inputs = [...document.querySelectorAll('input')].filter(visible);
+          if (inputs.length === 1) {
+            const el = inputs[0];
+            el.focus();
+            el.value = otp;
+            el.dispatchEvent(new Event('input', {bubbles:true}));
+            el.dispatchEvent(new Event('change', {bubbles:true}));
+            return true;
+          }
+          const digits = inputs.filter(el => el.maxLength === 1 || el.getAttribute('inputmode') === 'numeric' || (el.name||'').includes('code'));
+          if (digits.length >= otp.length) {
+            for (let i = 0; i < otp.length; i++) {
+              digits[i].focus();
+              digits[i].value = otp[i];
+              digits[i].dispatchEvent(new Event('input', {bubbles:true}));
+              digits[i].dispatchEvent(new Event('change', {bubbles:true}));
+            }
+            return true;
+          }
+          return false;
+        }
+        """, code)
+        if js_ok:
+            logger.info("[BrowserUse][OTP] JS 智能填入 OTP 成功")
+            return
+    except Exception as exc:
+        logger.debug("[BrowserUse][OTP] JS 智能填入异常: %s", exc)
+
     raise RuntimeError("找不到 OTP 输入框")
 
 
