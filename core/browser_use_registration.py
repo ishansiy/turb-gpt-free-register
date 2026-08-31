@@ -1339,10 +1339,54 @@ def _type_otp(page, code: str) -> None:
     if not code:
         raise RuntimeError("OTP 为空")
 
-    # 循环等待 OTP 输入框出现并填入（最多 15 秒）
     start_t = time.time()
     while time.time() - start_t < 15:
-        # 单框
+        # 1. 尝试首框聚焦并整串键入 / 粘贴（React 自动分发 6 位的最佳实践）
+        try:
+            pasted = page.evaluate(r'''(otp) => {
+              const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+                && getComputedStyle(el).visibility !== 'hidden'
+                && getComputedStyle(el).display !== 'none'
+                && !el.disabled;
+              const inputs = [...document.querySelectorAll('input')].filter(visible).filter(el => el.type !== 'password' && el.type !== 'hidden');
+              if (!inputs.length) return false;
+
+              // 如果是单个完整输入框
+              if (inputs.length === 1) {
+                const el = inputs[0];
+                el.focus();
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+                if (setter) setter.call(el, otp); else el.value = otp;
+                el.dispatchEvent(new InputEvent('input', {bubbles:true, data:otp}));
+                el.dispatchEvent(new Event('change', {bubbles:true}));
+                return true;
+              }
+
+              // 如果是 6 位分格输入框
+              const digits = inputs.filter(el => el.maxLength === 1 || el.getAttribute('inputmode') === 'numeric' || (el.name||'').includes('code') || (el.id||'').includes('code') || el.hasAttribute('data-index'));
+              const targetInputs = digits.length >= otp.length ? digits : inputs;
+              if (targetInputs.length >= otp.length) {
+                for (let i = 0; i < otp.length; i++) {
+                  const el = targetInputs[i];
+                  el.focus();
+                  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+                  if (setter) setter.call(el, otp[i]); else el.value = otp[i];
+                  el.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, cancelable:true, data:otp[i], inputType:'insertText'}));
+                  el.dispatchEvent(new InputEvent('input', {bubbles:true, data:otp[i]}));
+                  el.dispatchEvent(new Event('change', {bubbles:true}));
+                }
+                return true;
+              }
+              return false;
+            }''', code)
+            if pasted:
+                logger.info("[BrowserUse][OTP] JS 智能填入/分发 OTP 成功: %s", code)
+                _human_pause(0.2, 0.4)
+                return
+        except Exception as exc:
+            logger.debug("[BrowserUse][OTP] JS 智能填入异常: %s", exc)
+
+        # 2. 单输入框 Playwright 填入
         if _fill_first(
             page,
             [
@@ -1360,7 +1404,7 @@ def _type_otp(page, code: str) -> None:
         ):
             return
 
-        # 多分框 6 位
+        # 3. 多分框 Playwright 逐格点击填入
         boxes = page.locator("input[maxlength='1'], input[data-index], input[aria-label*='digit' i], input[aria-label*='桁' i], input[aria-label*='code' i]")
         try:
             count = boxes.count()
@@ -1371,47 +1415,15 @@ def _type_otp(page, code: str) -> None:
                 box = boxes.nth(i)
                 try:
                     _human_click_locator(box, timeout=1200)
-                    _human_pause(0.05, 0.14)
-                    page.keyboard.type(ch, delay=random.randint(35, 110))
+                    _human_pause(0.04, 0.1)
+                    page.keyboard.type(ch, delay=random.randint(25, 80))
                 except Exception:
                     raise
-                _human_pause(0.04, 0.16)
+                _human_pause(0.02, 0.08)
             return
 
-        # JS 全局兜底
-        try:
-            js_ok = page.evaluate(r"""
-            (otp) => {
-              const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
-              const inputs = [...document.querySelectorAll('input')].filter(visible);
-              if (inputs.length === 1 && inputs[0].type !== 'password') {
-                const el = inputs[0];
-                el.focus();
-                el.value = otp;
-                el.dispatchEvent(new Event('input', {bubbles:true}));
-                el.dispatchEvent(new Event('change', {bubbles:true}));
-                return true;
-              }
-              const digits = inputs.filter(el => el.maxLength === 1 || el.getAttribute('inputmode') === 'numeric' || (el.name||'').includes('code'));
-              if (digits.length >= otp.length) {
-                for (let i = 0; i < otp.length; i++) {
-                  digits[i].focus();
-                  digits[i].value = otp[i];
-                  digits[i].dispatchEvent(new Event('input', {bubbles:true}));
-                  digits[i].dispatchEvent(new Event('change', {bubbles:true}));
-                }
-                return true;
-              }
-              return false;
-            }
-            """, code)
-            if js_ok:
-                logger.info("[BrowserUse][OTP] JS 智能填入 OTP 成功")
-                return
-        except Exception as exc:
-            logger.debug("[BrowserUse][OTP] JS 智能填入异常: %s", exc)
-
         time.sleep(0.5)
+
     raise RuntimeError("找不到 OTP 输入框")
 
 
@@ -1438,6 +1450,35 @@ def _clear_otp_inputs(page) -> None:
 
 
 def _click_continue(page) -> None:
+    try:
+        clicked = page.evaluate(r'''() => {
+          const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+            && getComputedStyle(el).visibility !== 'hidden'
+            && getComputedStyle(el).display !== 'none'
+            && !el.disabled;
+          const buttons = [...document.querySelectorAll('button, input[type="submit"], [role="button"], a')].filter(visible);
+          for (const b of buttons) {
+            const t = (b.innerText || b.textContent || b.value || b.getAttribute('aria-label') || '').toLowerCase();
+            const type = (b.type || '').toLowerCase();
+            const action = (b.getAttribute('data-dd-action-name') || '').toLowerCase();
+            if (type === 'submit' || action === 'continue' || /continue|verify|submit|next|続行|次へ|確認|送信|继续|验证/.test(t)) {
+              b.scrollIntoView({block:'center'});
+              b.click();
+              return true;
+            }
+          }
+          const form = document.querySelector('form');
+          if (form && typeof form.requestSubmit === 'function') {
+            form.requestSubmit();
+            return true;
+          }
+          return false;
+        }''')
+        if clicked:
+            return
+    except Exception as exc:
+        logger.debug("[BrowserUse] JS click_continue 异常: %s", exc)
+
     if not _click_first(
         page,
         [
@@ -1449,11 +1490,12 @@ def _click_continue(page) -> None:
             "button:has-text('Verify')",
             "button:has-text('Submit')",
             "button:has-text('続行')",
+            "button:has-text('次へ')",
             "button:has-text('继续')",
             "button:has-text('验证')",
             "form button",
         ],
-        timeout_ms=5000,
+        timeout_ms=3000,
     ):
         _human_pause(0.12, 0.35)
         page.keyboard.press("Enter")
@@ -1584,13 +1626,22 @@ def _wait_after_otp(page, timeout: int = 12) -> str:
             body = (page.locator("body").inner_text(timeout=1000) or "").lower()
         except Exception:
             pass
-        if any(x in url for x in ("about-you", "profile", "chatgpt.com", "create-account/about")):
+        if any(x in url for x in ("about-you", "profile", "chatgpt.com", "create-account/about", "signup/profile")):
             return "accepted"
-        if any(x in body for x in ("incorrect", "invalid", "expired", "错误", "过期", "无效")) and _is_email_verification_page(page):
+        if any(x in body for x in ("incorrect", "invalid", "expired", "エラー", "無効", "期限切れ", "错误", "过期", "无效")) and _is_email_verification_page(page):
             return "invalid"
         if "chatgpt.com" in url and "auth" not in url:
             return "accepted"
+        
+        # 若仍停留在 email-verification，每隔 2 秒尝试按一次 Enter 或触发一次提交
+        if time.time() - end + timeout > 3 and int(time.time()) % 2 == 0:
+            try:
+                page.keyboard.press("Enter")
+            except Exception:
+                pass
         time.sleep(0.25 if _fast_mode() else 0.5)
+    if "email-verification" in _page_url(page).lower():
+        return "still_on_otp_page"
     return "unknown"
 
 
@@ -2749,10 +2800,11 @@ def run_browser_use_registration(
                     logger.info("[BrowserUse][OTP] 提交按钮未找到，继续观察页面：%s", str(exc)[:120])
                 _check_manual_stop()
 
-                outcome = _wait_after_otp(page, timeout=6 if _fast_mode() else 12)
+                outcome = _wait_after_otp(page, timeout=8 if _fast_mode() else 14)
                 _t_otp_submit.done(f"state={outcome}")
-                if outcome in ("accepted", "unknown"):
-                    # unknown 也继续尝试资料页/session
+                if outcome == "accepted":
+                    break
+                if outcome == "unknown" and "email-verification" not in _page_url(page).lower():
                     break
                 if otp_attempt >= max_otp_attempts:
                     raise RuntimeError("邮箱验证码连续错误/过期")
