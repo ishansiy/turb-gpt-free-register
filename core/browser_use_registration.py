@@ -1335,109 +1335,55 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
 
 
 def _type_otp(page, code: str) -> None:
+    """输入 6 位验证码并强制触发提交。"""
     code = str(code or "").strip()
     if not code:
         raise RuntimeError("OTP 为空")
 
-    start_t = time.time()
-    while time.time() - start_t < 15:
-        try:
-            inputs_info = page.evaluate(r'''() => {
-              const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
-                && getComputedStyle(el).visibility !== 'hidden'
-                && getComputedStyle(el).display !== 'none'
-                && !el.disabled && !el.readOnly;
-              const allInputs = [...document.querySelectorAll('input')].filter(visible).filter(el => el.type !== 'password' && el.type !== 'hidden');
-              return allInputs.map((el, i) => ({
-                index: i,
-                id: el.id || '',
-                name: el.name || '',
-                type: el.type || '',
-                maxLength: el.maxLength,
-                inputmode: el.getAttribute('inputmode') || '',
-                autocomplete: el.getAttribute('autocomplete') || '',
-                ariaLabel: el.getAttribute('aria-label') || '',
-                placeholder: el.placeholder || ''
-              }));
-            }''')
-        except Exception:
-            inputs_info = []
+    logger.info("[BrowserUse][OTP] 开始填入验证码: %s", code)
 
-        if inputs_info:
-            logger.info("[BrowserUse][OTP] 检测到页面可用输入框: %s 个, 详情: %s", len(inputs_info), inputs_info)
-            try:
-                page.evaluate(r'''() => {
-                  const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
-                    && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
-                  const inputs = [...document.querySelectorAll('input')]
-                    .filter(visible)
-                    .filter(el => el.type !== 'password' && el.type !== 'hidden' && !el.disabled && !el.readOnly);
-                  if (inputs.length) {
-                    inputs[0].focus();
-                    inputs[0].select && inputs[0].select();
-                  }
-                }''')
+    # 1. 聚焦输入框并使用真实键盘输入
+    try:
+        page.evaluate(r'''(val) => {
+          const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+            && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+          const el = document.querySelector('input[name="code"]') 
+            || document.querySelector('input[maxLength="6"]') 
+            || document.querySelector('input[autocomplete="one-time-code"]')
+            || document.querySelector('input[type="text"]')
+            || document.querySelector('input[inputmode="numeric"]');
+          if (el) {
+            el.scrollIntoView({block: 'center'});
+            el.focus();
+            el.value = '';
+          }
+        }''', code)
+        time.sleep(0.2)
 
-                # 清空已有字符
-                try:
-                    page.keyboard.press("ControlOrMeta+A")
-                    page.keyboard.press("Backspace")
-                except Exception:
-                    pass
+        # 发送原生键盘按键
+        page.keyboard.type(code, delay=80)
+        logger.info("[BrowserUse][OTP] 真实键盘键入完成: %s", code)
 
-                # 原生键入 OTP
-                page.keyboard.type(code, delay=random.randint(60, 110))
-                logger.info("[BrowserUse][OTP] 真实键盘键入 OTP 完成: %s", code)
-                _human_pause(0.2, 0.4)
+        # 触发 React 状态更新
+        page.evaluate(r'''(val) => {
+          const el = document.activeElement || document.querySelector('input[name="code"]') || document.querySelector('input[maxLength="6"]');
+          if (el && el.tagName === 'INPUT') {
+            if (!el.value) {
+              const proto = HTMLInputElement.prototype;
+              const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+              if (setter) setter.call(el, val); else el.value = val;
+            }
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+          }
+        }''', code)
+    except Exception as exc:
+        logger.warning("[BrowserUse][OTP] 键盘键入异常: %s", exc)
 
-                # 触发 input & change & blur 事件确保 React 更新 Hook 状态
-                page.evaluate(r'''() => {
-                  const inputs = [...document.querySelectorAll('input')].filter(el => el.type !== 'password' && el.type !== 'hidden');
-                  for (const el of inputs) {
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                  }
-                  if (document.activeElement && typeof document.activeElement.blur === 'function') {
-                    document.activeElement.blur();
-                  }
-                }''')
-                _human_pause(0.3, 0.6)
+    time.sleep(0.5)
 
-                # 尝试点击提交按钮
-                clicked = page.evaluate(r'''() => {
-                  const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
-                    && getComputedStyle(el).visibility !== 'hidden'
-                    && getComputedStyle(el).display !== 'none';
-                  const allButtons = [...document.querySelectorAll('button, input[type="submit"], [role="button"]')].filter(visible);
-                  for (const b of allButtons) {
-                    b.removeAttribute('disabled');
-                    b.removeAttribute('aria-disabled');
-                    const t = (b.innerText || b.textContent || b.value || b.getAttribute('aria-label') || '').toLowerCase();
-                    const type = (b.type || '').toLowerCase();
-                    const action = (b.getAttribute('data-dd-action-name') || '').toLowerCase();
-                    if (type === 'submit' || action === 'continue' || /continue|verify|submit|next|続行|次へ|確認|送信|继续|验证/.test(t)) {
-                      b.click();
-                      return true;
-                    }
-                  }
-                  const form = document.querySelector('form');
-                  if (form && typeof form.requestSubmit === 'function') {
-                    form.requestSubmit();
-                    return true;
-                  }
-                  return false;
-                }''')
-                logger.info("[BrowserUse][OTP] JS 智能提交按钮点击结果: %s", clicked)
-
-                # 原生 Enter 兜底
-                page.keyboard.press("Enter")
-                return
-            except Exception as exc:
-                logger.warning("[BrowserUse][OTP] 键入/提交异常: %s", exc)
-
-        time.sleep(0.5)
-
-    raise RuntimeError("找不到 OTP 输入框")
+    # 2. 触发提交
+    _click_continue(page)
 
 
 def _clear_otp_inputs(page) -> None:
@@ -1463,19 +1409,20 @@ def _clear_otp_inputs(page) -> None:
 
 
 def _click_continue(page) -> None:
+    """点击 OTP 提交按钮或回车提交。"""
+    clicked = False
     try:
         clicked = page.evaluate(r'''() => {
           const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
-            && getComputedStyle(el).visibility !== 'hidden'
-            && getComputedStyle(el).display !== 'none'
-            && !el.disabled;
-          const buttons = [...document.querySelectorAll('button, input[type="submit"], [role="button"], a')].filter(visible);
+            && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+          const buttons = [...document.querySelectorAll('button, input[type="submit"], [role="button"]')].filter(visible);
           for (const b of buttons) {
             const t = (b.innerText || b.textContent || b.value || b.getAttribute('aria-label') || '').toLowerCase();
             const type = (b.type || '').toLowerCase();
-            const action = (b.getAttribute('data-dd-action-name') || '').toLowerCase();
-            if (type === 'submit' || action === 'continue' || /continue|verify|submit|next|続行|次へ|確認|送信|继续|验证/.test(t)) {
-              b.scrollIntoView({block:'center'});
+            if (type === 'submit' || /continue|verify|submit|next|続行|次へ|確認|送信|继续|验证/.test(t) || b.getAttribute('data-dd-action-name') === 'continue') {
+              b.disabled = false;
+              b.removeAttribute('aria-disabled');
+              b.scrollIntoView({block: 'center'});
               b.click();
               return true;
             }
@@ -1487,31 +1434,22 @@ def _click_continue(page) -> None:
           }
           return false;
         }''')
-        if clicked:
-            return
+        logger.info("[BrowserUse][OTP] JS 智能提交按钮点击结果: %s", clicked)
     except Exception as exc:
-        logger.debug("[BrowserUse] JS click_continue 异常: %s", exc)
+        logger.debug("[BrowserUse][OTP] JS 提交按钮点击异常: %s", exc)
 
-    if not _click_first(
-        page,
-        [
-            "button[type='submit']",
-            "button[data-dd-action-name='Continue']",
-            "button[data-dd-action-name='continue']",
-            "button[data-login-web-auth-control='true'][type='submit']",
-            "button:has-text('Continue')",
-            "button:has-text('Verify')",
-            "button:has-text('Submit')",
-            "button:has-text('続行')",
-            "button:has-text('次へ')",
-            "button:has-text('继续')",
-            "button:has-text('验证')",
-            "form button",
-        ],
-        timeout_ms=3000,
-    ):
-        _human_pause(0.12, 0.35)
+    try:
         page.keyboard.press("Enter")
+    except Exception:
+        pass
+
+    try:
+        loc = page.locator("button[type='submit'], button:has-text('Continue'), button:has-text('続行'), button:has-text('次へ'), form button").first
+        if loc.is_visible(timeout=1000):
+            loc.click(force=True, timeout=2000)
+            clicked = True
+    except Exception:
+        pass
 
 
 def _click_resend_otp(page) -> bool:
@@ -1630,8 +1568,10 @@ def _click_resend_otp(page) -> bool:
 
 
 def _wait_after_otp(page, timeout: int = 14) -> str:
-    """返回 accepted / invalid / still_on_otp_page / unknown。"""
+    """严格等待 OTP 提交通行：返回 accepted / invalid / still_on_otp_page / unknown。"""
     end = time.time() + timeout
+    last_retry = 0.0
+
     while time.time() < end:
         url = _page_url(page).lower()
         if any(x in url for x in ("about-you", "profile", "chatgpt.com", "create-account/about", "signup/profile", "callback")):
@@ -1650,10 +1590,7 @@ def _wait_after_otp(page, timeout: int = 14) -> str:
                 && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
               const inputs = [...document.querySelectorAll('input')].filter(visible);
               const names = inputs.map(el => (el.name || el.id || el.getAttribute('aria-label') || el.placeholder || '').toLowerCase()).join(' ');
-              if (/firstname|first_name|lastname|last_name|birthdate|birthday|year|month|day|age|名前|生年月日|お名前/.test(names)) {
-                return true;
-              }
-              return false;
+              return /firstname|first_name|lastname|last_name|birthdate|birthday|year|month|day|age|名前|生年月日|お名前/.test(names);
             }''')
             if is_profile:
                 logger.info("[BrowserUse][OTP] 检测到页面已进入资料填写阶段 (姓名/生日)")
@@ -1661,21 +1598,7 @@ def _wait_after_otp(page, timeout: int = 14) -> str:
         except Exception:
             pass
 
-        # 3. 检查 OTP 输入框是否已消失（已提交通过）
-        try:
-            otp_still_there = page.evaluate(r'''() => {
-              const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
-                && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
-              const inputs = [...document.querySelectorAll('input')].filter(visible).filter(el => el.type !== 'password' && el.type !== 'hidden');
-              return inputs.some(el => (el.name||'').includes('code') || (el.id||'').includes('code') || (el.autocomplete||'').includes('one-time') || el.maxLength === 6);
-            }''')
-            if not otp_still_there and "auth.openai.com" in url:
-                logger.info("[BrowserUse][OTP] OTP 输入框已消失，判断已通过验证")
-                return "accepted"
-        except Exception:
-            pass
-
-        # 4. 检查真正的错误提示
+        # 3. 检查真正的错误提示
         try:
             has_err = page.evaluate(r'''() => {
               const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
@@ -1691,11 +1614,18 @@ def _wait_after_otp(page, timeout: int = 14) -> str:
               return false;
             }''')
             if has_err and _is_email_verification_page(page):
+                logger.warning("[BrowserUse][OTP] 检测到验证码错误提示")
                 return "invalid"
         except Exception:
             pass
 
-        time.sleep(0.25 if _fast_mode() else 0.5)
+        # 若仍停留在 email-verification，每隔 3 秒重新尝试触发一次提交
+        if time.time() - last_retry > 3.0:
+            logger.info("[BrowserUse][OTP] 仍停留在验证码页，重新触发提交与回车...")
+            _click_continue(page)
+            last_retry = time.time()
+
+        time.sleep(0.35 if _fast_mode() else 0.8)
 
     if "email-verification" in _page_url(page).lower():
         return "still_on_otp_page"
