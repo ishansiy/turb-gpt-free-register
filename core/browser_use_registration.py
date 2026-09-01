@@ -1153,6 +1153,7 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
     end = time.time() + timeout
     last_heartbeat = 0.0
     last_log = 0.0
+    clicked_password_entry = False
     while time.time() < end:
         # 邮箱提交后若已经在验证码页，优先点击“使用密码继续”切到密码创建页。
         try:
@@ -1160,7 +1161,8 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
                 quick = _quick_auth_state(page)
                 if str(quick.get("state") or "") == "email_verification":
                     if _click_continue_with_password_if_present(page):
-                        logger.info("[BrowserUse] 邮箱验证码页已点击“使用密码继续”：url=%s", quick.get("url") or _page_url(page) or "-")
+                        clicked_password_entry = True
+                        logger.info("[BrowserUse] 邮箱验证码页已点击“使用密码继续”，等待跳转到密码页：url=%s", quick.get("url") or _page_url(page) or "-")
                         time.sleep(0.4 if _fast_mode() else 1.0)
                         continue
                     logger.info("[BrowserUse] 已在邮箱验证码页，跳过密码页等待，直接进入 OTP 阶段：url=%s", quick.get("url") or _page_url(page) or "-")
@@ -1186,12 +1188,21 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
             last_log = time.time()
         if state == "email_verification" and not _is_signup_password_page(page):
             if _click_continue_with_password_if_present(page):
-                logger.info("[BrowserUse] 邮箱验证码页已点击“使用密码继续”：email=%s", email)
+                clicked_password_entry = True
+                logger.info("[BrowserUse] 邮箱验证码页已点击“使用密码继续”，等待跳转到密码页：email=%s", email)
                 time.sleep(0.4 if _fast_mode() else 1.0)
                 continue
             logger.info("[BrowserUse] 邮箱提交已直接进入验证码页，跳过密码设置并直接进入 OTP 阶段：email=%s", email)
             return None
         if state not in ("password", "login_password"):
+            # 已点击“使用密码继续”后页面需要时间跳转到 /create-account/password；
+            # 此时绝不提前退出，最多等满 25s 直到密码页出现（否则密码永远填不上）。
+            if clicked_password_entry:
+                if time.time() - started >= timeout:
+                    logger.info("[BrowserUse] 已点击“使用密码继续”但密码页未出现，交由 OTP 阶段处理：state=%s url=%s", state, state_info.get("url") or "-")
+                    return None
+                time.sleep(0.3 if _fast_mode() else 0.5)
+                continue
             # 提交邮箱后如果仍显示 /auth/login 但页面其实已经渲染验证码输入框，
             # 某些 Browser Use target 上 DOM 状态会短暂滞后。不要在“密码页检测”里长等，
             # 直接交给后面的 OTP 阶段处理，避免云端会话被拖到关闭。
