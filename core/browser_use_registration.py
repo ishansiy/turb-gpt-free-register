@@ -2176,15 +2176,11 @@ def _force_exit_profile_page(page, deadline: float) -> bool:
 
 
 def _complete_profile_page(page, name: str, birthday: str, timeout: int = 60) -> bool:
-    """资料页填写/提交：提交后不无限等待；Skyvern 卡住时强制跳出 about-you。"""
-
+    """资料页填写/提交：智能识别 DOM 资料表单并填写提交。"""
     timeout = min(timeout, 45) if _fast_mode() else timeout
     end = time.time() + timeout
     submitted = False
-    last_submit = 0.0
     last_log = 0.0
-    last_info: dict[str, Any] = {}
-    last_diag: dict[str, Any] = {}
     post_submit_hard_exit_at: float | None = None
 
     while time.time() < end:
@@ -2197,72 +2193,52 @@ def _complete_profile_page(page, name: str, birthday: str, timeout: int = 60) ->
             logger.info("[BrowserUse] 资料页提交后已检测到 accessToken")
             return True
 
-        body = ""
+        # 使用 evaluate 精准探测页面是否含有 profile 字段或表单
         try:
-            body = (page.locator("body").inner_text(timeout=800) or "").lower()
+            looks_profile = page.evaluate(r'''() => {
+              const url = location.href.toLowerCase();
+              if (/about-you|profile|create-account\/about|signup\/profile/.test(url)) return true;
+              const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+                && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+              const inputs = [...document.querySelectorAll('input, select, [role="spinbutton"]')].filter(visible).filter(el => el.type !== 'password' && el.type !== 'hidden');
+              const text = inputs.map(el => (el.name || el.id || el.getAttribute('aria-label') || el.placeholder || '').toLowerCase()).join(' ');
+              return /name|first|last|birth|age|year|month|day|名前|生年月日|誕生日|年齢|お名前|氏名/.test(text) || (inputs.length >= 1 && !inputs.some(el => el.maxLength === 6 || (el.name||'').includes('code')));
+            }''')
         except Exception:
-            pass
-        looks_profile = any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile")) or any(x in body for x in ("birthday", "birth", "age", "name", "誕生日", "年齢", "名前", "生日", "年龄", "姓名"))
+            looks_profile = False
 
-        if looks_profile:
-            if not submitted:
-                logger.info("[BrowserUse] 资料页：填写/提交昵称生日 url=%s", _page_url(page) or "-")
-                info = _human_complete_profile(page, name, birthday)
-                last_info = info
-                logger.info("[BrowserUse] 资料页人工化提交结果：%s", str(info)[:900])
-                if not info.get("submitted"):
-                    js_info = _js_complete_profile(page, name, birthday)
-                    last_info = {"human": info, "js": js_info}
-                    logger.info("[BrowserUse] 资料页 JS 兜底提交结果：%s", str(js_info)[:900])
-                    submitted = bool(js_info.get("submitted") or submitted)
-                else:
-                    submitted = True
-                if submitted and post_submit_hard_exit_at is None:
-                    # 已提交后不再重复填写/点击；最多给它 10~16 秒同步登录态，然后强制跳出。
-                    post_submit_hard_exit_at = time.time() + (10 if _fast_mode() else 16)
-                last_submit = time.time()
-                _bu_delay("form")
-            elif time.time() - last_log > 2:
-                logger.info("[BrowserUse] 资料页已提交，等待短暂跳转/准备取 AT：url=%s", _page_url(page) or "-")
-                last_log = time.time()
+        if looks_profile and not submitted:
+            logger.info("[BrowserUse] 探测到资料页：开始填写/提交姓名生日 url=%s", _page_url(page) or "-")
+            info = _human_complete_profile(page, name, birthday)
+            logger.info("[BrowserUse] 资料页人工化提交结果：%s", str(info)[:500])
+            if not info.get("submitted"):
+                js_info = _js_complete_profile(page, name, birthday)
+                logger.info("[BrowserUse] 资料页 JS 兜底提交结果：%s", str(js_info)[:500])
+                submitted = bool(js_info.get("submitted") or info.get("submitted"))
+            else:
+                submitted = True
 
-            if submitted and post_submit_hard_exit_at and time.time() >= post_submit_hard_exit_at:
-                if _force_exit_profile_page(page, min(end, time.time() + (8 if _fast_mode() else 12))):
-                    logger.info("[BrowserUse] 资料页提交后已通过强制跳转退出：%s", _page_url(page) or "-")
-                    return True
-                break
-            time.sleep(0.35 if _fast_mode() else 0.8)
-            continue
+            if submitted and post_submit_hard_exit_at is None:
+                post_submit_hard_exit_at = time.time() + (8 if _fast_mode() else 14)
+            _bu_delay("form")
 
         if submitted:
             if _has_chatgpt_access_token(page):
                 logger.info("[BrowserUse] 资料页提交后已检测到 accessToken")
                 return True
-            if post_submit_hard_exit_at is None:
-                post_submit_hard_exit_at = time.time() + (10 if _fast_mode() else 16)
-            if time.time() - last_log > 2:
-                logger.info("[BrowserUse] 资料页已提交，等待登录态同步：url=%s", _page_url(page) or "-")
-                last_log = time.time()
-            if time.time() >= post_submit_hard_exit_at:
-                if _force_exit_profile_page(page, min(end, time.time() + (8 if _fast_mode() else 12))):
-                    logger.info("[BrowserUse] 资料页提交后已通过强制跳转退出：%s", _page_url(page) or "-")
+            if post_submit_hard_exit_at and time.time() >= post_submit_hard_exit_at:
+                logger.info("[BrowserUse] 资料页提交后等待超时，准备跳入 ChatGPT 读取登录态")
+                if _force_exit_profile_page(page, min(end, time.time() + (6 if _fast_mode() else 10))):
                     return True
                 break
-            time.sleep(0.35 if _fast_mode() else 0.8)
-            continue
 
         if time.time() - last_log > 2:
-            logger.info("[BrowserUse] 等待资料页/登录态：url=%s", _page_url(page) or "-")
+            logger.info("[BrowserUse] 等待资料页/登录态：url=%s submitted=%s looks_profile=%s", _page_url(page) or "-", submitted, looks_profile)
             last_log = time.time()
-        time.sleep(0.25 if _fast_mode() else 0.6)
+        time.sleep(0.35 if _fast_mode() else 0.8)
 
-    url = _page_url(page).lower()
-    if any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile")):
-        last_diag = _profile_diagnostics(page)
-        if submitted:
-            raise RuntimeError(f"资料页提交后超时仍未跳转，转入取 AT；last_info={str(last_info)[:900]} diag={str(last_diag)[:1200]}")
-        raise RuntimeError(f"资料页处理超时且未确认提交，转入取 AT；last_info={str(last_info)[:900]} diag={str(last_diag)[:1200]}")
     return submitted
+
 
 
 def _is_target_closed_error(exc: Exception | str) -> bool:
