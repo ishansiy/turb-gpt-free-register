@@ -2625,7 +2625,7 @@ def _fetch_chatgpt_session(page, context=None, timeout: int = 120) -> dict:
             if first_not_chatgpt_at is None:
                 first_not_chatgpt_at = time.time()
             wait_before_open = 2.0 if _fast_mode() else 8.0
-            if page is not None and _fast_mode() and not proactive_opened and time.time() - first_not_chatgpt_at >= wait_before_open:
+            if page is not None and not proactive_opened and time.time() - first_not_chatgpt_at >= 3.0:
                 logger.info("[BrowserUse] 未快速自动跳转 chatgpt.com，主动打开首页读取 session：current=%s", _page_url(page) or "-")
                 try:
                     page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=_timeout_ms(getattr(_cfg, "BROWSER_USE_NAVIGATION_TIMEOUT", 90)))
