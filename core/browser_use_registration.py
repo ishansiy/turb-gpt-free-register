@@ -1650,8 +1650,33 @@ def _fill_birthday_fields(page, birthday: str) -> None:
     except Exception as exc:
         raise RuntimeError(f"生日格式应为 YYYY-MM-DD: {birthday}") from exc
 
-    # 年龄数字页
+    # 年龄数字页（优先 JS + 键盘双重保证）
     age = max(18, min(60, 2026 - year))
+    age_str = str(age)
+    try:
+        filled_age = page.evaluate("""(val) => {
+            const el = document.querySelector("input[name='age'], input[type='number'], input[id*='age']");
+            if (!el) return false;
+            el.scrollIntoView({block: 'center'});
+            el.focus();
+            el.value = '';
+            return true;
+        }""", age_str)
+        if filled_age:
+            time.sleep(0.2)
+            page.keyboard.type(age_str, delay=60)
+            page.evaluate("""() => {
+                const el = document.querySelector("input[name='age'], input[type='number'], input[id*='age']");
+                if (el) {
+                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    el.dispatchEvent(new Event('blur', {bubbles: true}));
+                }
+            }""")
+            return
+    except Exception:
+        pass
+
     if _fill_first(
         page,
         [
@@ -1661,7 +1686,7 @@ def _fill_birthday_fields(page, birthday: str) -> None:
             "input[placeholder*='age' i]",
             "input[type='number']",
         ],
-        str(age),
+        age_str,
         timeout_ms=2500,
     ):
         return
@@ -1878,37 +1903,48 @@ def _human_complete_profile(page, name: str, birthday: str) -> dict:
         pass
     info["checkboxCount"] = checkbox_count
 
-    submitted = _click_first(
-        page,
-        [
-            "button[type='submit']",
-            "input[type='submit']",
-            "button:has-text('Continue')",
-            "button:has-text('Next')",
-            "button:has-text('Done')",
-            "button:has-text('Submit')",
-            "button:has-text('Create')",
-            "button:has-text('Start')",
-            "button:has-text('続行')",
-            "button:has-text('次へ')",
-            "button:has-text('完了')",
-            "button:has-text('送信')",
-            "button:has-text('继续')",
-            "button:has-text('下一步')",
-            "button:has-text('完成')",
-            "button:has-text('提交')",
-            "form button",
-        ],
-        timeout_ms=8000,
-    )
+    # 提交按钮：强制解除 disabled 并点击，外加原生点击兜底
+    submitted = False
+    try:
+        submitted = bool(page.evaluate("""() => {
+            const bad = /google|apple|ワンタイム|gmail/i;
+            const btns = [...document.querySelectorAll('button, input[type="submit"]')];
+            for (const b of btns) {
+                const t = (b.innerText || b.value || '').trim();
+                if (bad.test(t)) continue;
+                if (b.type === 'submit' || /続行|Continue|Next|次へ|Submit|送信/i.test(t) || b.dataset.ddActionName === 'Continue') {
+                    b.disabled = false;
+                    b.removeAttribute('aria-disabled');
+                    b.dispatchEvent(new MouseEvent('pointerdown', {bubbles: true, cancelable: true}));
+                    b.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                    b.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                    b.click();
+                    return true;
+                }
+            }
+            return false;
+        }"""))
+    except Exception:
+        submitted = False
+
     if not submitted:
-        _human_pause(0.2, 0.55)
-        try:
-            page.keyboard.press("Enter")
-            submitted = True
-            info["method"] = "human_enter"
-        except Exception:
-            submitted = False
+        submitted = _click_first(
+            page,
+            [
+                "button[type='submit']",
+                "input[type='submit']",
+                "button:has-text('続行')",
+                "button:has-text('Continue')",
+                "form button",
+            ],
+            timeout_ms=3000,
+        )
+
+    _human_pause(0.2, 0.4)
+    try:
+        page.keyboard.press("Enter")
+    except Exception:
+        pass
     info["submitted"] = bool(submitted)
     info["ok"] = bool(name_ok and submitted)
     info["url"] = _page_url(page)
