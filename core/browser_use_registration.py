@@ -1341,77 +1341,72 @@ def _type_otp(page, code: str) -> None:
 
     start_t = time.time()
     while time.time() - start_t < 15:
-        # 1. 优先探测 6 位分格输入框（OpenAI 核心形态）
-        boxes = page.locator("input[maxlength='1'], input[data-index], input[aria-label*='digit' i], input[aria-label*='桁' i]")
+        # 1. 探测页面上的可见输入框信息（排除 password 和 hidden）
         try:
-            count = boxes.count()
-        except Exception:
-            count = 0
-        if count >= len(code):
-            for i in range(len(code)):
-                box = boxes.nth(i)
-                try:
-                    box.click(timeout=1000)
-                    box.fill(code[i], timeout=1000)
-                    _human_pause(0.02, 0.08)
-                except Exception:
-                    pass
-            logger.info("[BrowserUse][OTP] Playwright 6 位分格精准填入完成: %s", code)
-            _human_pause(0.2, 0.4)
-            return
-
-        # 2. JS 智能分发/填入（处理复杂 React 6 格输入）
-        try:
-            pasted = page.evaluate(r'''(otp) => {
+            inputs_info = page.evaluate(r'''() => {
               const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
                 && getComputedStyle(el).visibility !== 'hidden'
                 && getComputedStyle(el).display !== 'none'
                 && !el.disabled;
-              const inputs = [...document.querySelectorAll('input')].filter(visible).filter(el => el.type !== 'password' && el.type !== 'hidden');
-              if (!inputs.length) return false;
-
-              const digits = inputs.filter(el => el.maxLength === 1 || (el.name||'').includes('code') || (el.id||'').includes('code') || el.hasAttribute('data-index') || (el.getAttribute('aria-label')||'').includes('桁') || (el.getAttribute('aria-label')||'').includes('digit'));
-              if (digits.length >= otp.length) {
-                for (let i = 0; i < otp.length; i++) {
-                  const el = digits[i];
-                  el.focus();
-                  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-                  if (setter) setter.call(el, otp[i]); else el.value = otp[i];
-                  el.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, cancelable:true, data:otp[i], inputType:'insertText'}));
-                  el.dispatchEvent(new InputEvent('input', {bubbles:true, data:otp[i]}));
-                  el.dispatchEvent(new Event('change', {bubbles:true}));
-                }
-                return true;
-              }
-
-              if (inputs.length === 1 && inputs[0].maxLength !== 1) {
-                const el = inputs[0];
-                el.focus();
-                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-                if (setter) setter.call(el, otp); else el.value = otp;
-                el.dispatchEvent(new InputEvent('input', {bubbles:true, data:otp}));
-                el.dispatchEvent(new Event('change', {bubbles:true}));
-                return true;
-              }
-
-              return false;
-            }''', code)
-            if pasted:
-                logger.info("[BrowserUse][OTP] JS 智能填入/分发 OTP 成功: %s", code)
-                _human_pause(0.2, 0.4)
-                return
-        except Exception as exc:
-            logger.debug("[BrowserUse][OTP] JS 智能填入异常: %s", exc)
-
-        # 3. 单输入框 Playwright 填入（严格排除 maxlength=1）
-        single_inputs = page.locator("input[name='code'], input[autocomplete='one-time-code'], input[name='otp']").filter(has_not=page.locator("[maxlength='1']"))
-        try:
-            if single_inputs.count() == 1:
-                single_inputs.first.fill(code, timeout=1200)
-                logger.info("[BrowserUse][OTP] 单框 fill 完成: %s", code)
-                return
+              const allInputs = [...document.querySelectorAll('input')].filter(visible).filter(el => el.type !== 'password' && el.type !== 'hidden');
+              return allInputs.map((el, i) => ({
+                index: i,
+                id: el.id || '',
+                name: el.name || '',
+                type: el.type || '',
+                maxLength: el.maxLength,
+                ariaLabel: el.getAttribute('aria-label') || ''
+              }));
+            }''')
         except Exception:
-            pass
+            inputs_info = []
+
+        if inputs_info:
+            logger.info("[BrowserUse][OTP] 检测到页面可用输入框: %s 个, 详情: %s", len(inputs_info), inputs_info)
+
+            # 情况 A: 6 位或多分格输入框
+            if len(inputs_info) >= len(code):
+                try:
+                    # 先尝试直接在首个输入框原生键入完整验证码（多数分格组件支持在首格连续按键）
+                    first_loc = page.locator("input:not([type='password']):not([type='hidden'])").nth(0)
+                    first_loc.click(timeout=1000)
+                    page.keyboard.type(code, delay=random.randint(60, 110))
+                    logger.info("[BrowserUse][OTP] 在首个输入框连续键入 OTP 成功: %s", code)
+                    _human_pause(0.2, 0.4)
+                    page.keyboard.press("Enter")
+                    return
+                except Exception as exc:
+                    logger.debug("[BrowserUse][OTP] 首格键入异常: %s", exc)
+
+                # 若首格未完成分发，则对每一格逐个点击并键入单字符
+                try:
+                    for i in range(len(code)):
+                        loc = page.locator("input:not([type='password']):not([type='hidden'])").nth(i)
+                        loc.click(timeout=800)
+                        page.keyboard.press("Backspace")
+                        page.keyboard.type(code[i], delay=random.randint(40, 80))
+                        _human_pause(0.02, 0.06)
+                    logger.info("[BrowserUse][OTP] 逐格原生键入 OTP 完成: %s", code)
+                    _human_pause(0.2, 0.4)
+                    page.keyboard.press("Enter")
+                    return
+                except Exception as exc:
+                    logger.warning("[BrowserUse][OTP] 逐格键入异常: %s", exc)
+
+            # 情况 B: 单个输入框
+            elif len(inputs_info) == 1:
+                try:
+                    loc = page.locator("input:not([type='password']):not([type='hidden'])").first
+                    loc.click(timeout=1000)
+                    page.keyboard.press("ControlOrMeta+A")
+                    page.keyboard.press("Backspace")
+                    page.keyboard.type(code, delay=random.randint(50, 100))
+                    logger.info("[BrowserUse][OTP] 单输入框原生键入 OTP 完成: %s", code)
+                    _human_pause(0.2, 0.4)
+                    page.keyboard.press("Enter")
+                    return
+                except Exception as exc:
+                    logger.warning("[BrowserUse][OTP] 单框键入异常: %s", exc)
 
         time.sleep(0.5)
 
