@@ -1341,7 +1341,6 @@ def _type_otp(page, code: str) -> None:
 
     start_t = time.time()
     while time.time() - start_t < 15:
-        # 1. 探测可见输入框（排除 password/hidden），确认 OTP 框形态
         try:
             inputs_info = page.evaluate(r'''() => {
               const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
@@ -1366,52 +1365,75 @@ def _type_otp(page, code: str) -> None:
 
         if inputs_info:
             logger.info("[BrowserUse][OTP] 检测到页面可用输入框: %s 个, 详情: %s", len(inputs_info), inputs_info)
+            try:
+                page.evaluate(r'''() => {
+                  const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+                    && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+                  const inputs = [...document.querySelectorAll('input')]
+                    .filter(visible)
+                    .filter(el => el.type !== 'password' && el.type !== 'hidden' && !el.disabled && !el.readOnly);
+                  if (inputs.length) {
+                    inputs[0].focus();
+                    inputs[0].select && inputs[0].select();
+                  }
+                }''')
 
-            # 情况 A: 多分格（>= len(code) 个 1 位框）或单 6 位框 — 统一策略：
-            #   用 JS focus + 真实 keydown/keypress/keyup + beforeinput/input（trusted）逐字符输入
-            #   OpenAI 的 React Aria 受控组件只认真实用户键入事件，fill/JS setter 均无效。
-            otp_targets = inputs_info if len(inputs_info) >= len(code) else inputs_info[:1]
-            if otp_targets:
+                # 清空已有字符
                 try:
-                    # 用 JS focus 无视覆盖层，并自动填充一行真实键盘输入
-                    ok = page.evaluate(r'''(codeStr) => {
-                      const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
-                        && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
-                      const inputs = [...document.querySelectorAll('input')]
-                        .filter(visible)
-                        .filter(el => el.type !== 'password' && el.type !== 'hidden' && !el.disabled && !el.readOnly)
-                        .slice(0, 6);
-                      if (!inputs.length) return false;
-                      const first = inputs[0];
-                      first.focus();
-                      first.select && first.select();
+                    page.keyboard.press("ControlOrMeta+A")
+                    page.keyboard.press("Backspace")
+                except Exception:
+                    pass
+
+                # 原生键入 OTP
+                page.keyboard.type(code, delay=random.randint(60, 110))
+                logger.info("[BrowserUse][OTP] 真实键盘键入 OTP 完成: %s", code)
+                _human_pause(0.2, 0.4)
+
+                # 触发 input & change & blur 事件确保 React 更新 Hook 状态
+                page.evaluate(r'''() => {
+                  const inputs = [...document.querySelectorAll('input')].filter(el => el.type !== 'password' && el.type !== 'hidden');
+                  for (const el of inputs) {
+                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                  }
+                  if (document.activeElement && typeof document.activeElement.blur === 'function') {
+                    document.activeElement.blur();
+                  }
+                }''')
+                _human_pause(0.3, 0.6)
+
+                # 尝试点击提交按钮
+                clicked = page.evaluate(r'''() => {
+                  const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+                    && getComputedStyle(el).visibility !== 'hidden'
+                    && getComputedStyle(el).display !== 'none';
+                  const allButtons = [...document.querySelectorAll('button, input[type="submit"], [role="button"]')].filter(visible);
+                  for (const b of allButtons) {
+                    b.removeAttribute('disabled');
+                    b.removeAttribute('aria-disabled');
+                    const t = (b.innerText || b.textContent || b.value || b.getAttribute('aria-label') || '').toLowerCase();
+                    const type = (b.type || '').toLowerCase();
+                    const action = (b.getAttribute('data-dd-action-name') || '').toLowerCase();
+                    if (type === 'submit' || action === 'continue' || /continue|verify|submit|next|続行|次へ|確認|送信|继续|验证/.test(t)) {
+                      b.click();
                       return true;
-                    }''', code)
-                    if not ok:
-                        time.sleep(0.5)
-                        continue
+                    }
+                  }
+                  const form = document.querySelector('form');
+                  if (form && typeof form.requestSubmit === 'function') {
+                    form.requestSubmit();
+                    return true;
+                  }
+                  return false;
+                }''')
+                logger.info("[BrowserUse][OTP] JS 智能提交按钮点击结果: %s", clicked)
 
-                    # 清空已有值（若历史残留）
-                    try:
-                        page.keyboard.press("ControlOrMeta+A")
-                        page.keyboard.press("Backspace")
-                    except Exception:
-                        pass
-
-                    # 输入完整验证码（Playwright 逐字符真实键入，trusted 事件，React Aria 100% 识别）
-                    page.keyboard.type(code, delay=random.randint(55, 110))
-                    logger.info("[BrowserUse][OTP] 真实键盘键入 OTP 完成: %s", code)
-                    _human_pause(0.25, 0.5)
-
-                    # 填满后：优先按 Enter 提交；若无效则交给外部继续观察
-                    try:
-                        page.keyboard.press("Enter")
-                        logger.info("[BrowserUse][OTP] 已按 Enter 提交 OTP")
-                    except Exception:
-                        pass
-                    return
-                except Exception as exc:
-                    logger.warning("[BrowserUse][OTP] 真实键入异常: %s", exc)
+                # 原生 Enter 兜底
+                page.keyboard.press("Enter")
+                return
+            except Exception as exc:
+                logger.warning("[BrowserUse][OTP] 键入/提交异常: %s", exc)
 
         time.sleep(0.5)
 
