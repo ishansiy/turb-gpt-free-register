@@ -1630,20 +1630,52 @@ def _click_resend_otp(page) -> bool:
 
 
 def _wait_after_otp(page, timeout: int = 14) -> str:
-    """返回 accepted / invalid / unknown。"""
+    """返回 accepted / invalid / still_on_otp_page / unknown。"""
     end = time.time() + timeout
     while time.time() < end:
         url = _page_url(page).lower()
-        if any(x in url for x in ("about-you", "profile", "chatgpt.com", "create-account/about", "signup/profile")):
+        if any(x in url for x in ("about-you", "profile", "chatgpt.com", "create-account/about", "signup/profile", "callback")):
             return "accepted"
         if "chatgpt.com" in url and "auth" not in url:
             return "accepted"
 
-        # 检查是否已有 accessToken
+        # 1. 检查是否已有 accessToken
         if _has_chatgpt_access_token(page):
             return "accepted"
 
-        # 严格检查真正的错误提示元素，避免把页面 disabled 按钮的“無効”文案误判为验证码错误
+        # 2. 检查 DOM 是否已进入资料填写阶段（姓名/生日/年龄输入框出现）
+        try:
+            is_profile = page.evaluate(r'''() => {
+              const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+                && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+              const inputs = [...document.querySelectorAll('input')].filter(visible);
+              const names = inputs.map(el => (el.name || el.id || el.getAttribute('aria-label') || el.placeholder || '').toLowerCase()).join(' ');
+              if (/firstname|first_name|lastname|last_name|birthdate|birthday|year|month|day|age|名前|生年月日|お名前/.test(names)) {
+                return true;
+              }
+              return false;
+            }''')
+            if is_profile:
+                logger.info("[BrowserUse][OTP] 检测到页面已进入资料填写阶段 (姓名/生日)")
+                return "accepted"
+        except Exception:
+            pass
+
+        # 3. 检查 OTP 输入框是否已消失（已提交通过）
+        try:
+            otp_still_there = page.evaluate(r'''() => {
+              const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+                && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+              const inputs = [...document.querySelectorAll('input')].filter(visible).filter(el => el.type !== 'password' && el.type !== 'hidden');
+              return inputs.some(el => (el.name||'').includes('code') || (el.id||'').includes('code') || (el.autocomplete||'').includes('one-time') || el.maxLength === 6);
+            }''')
+            if not otp_still_there and "auth.openai.com" in url:
+                logger.info("[BrowserUse][OTP] OTP 输入框已消失，判断已通过验证")
+                return "accepted"
+        except Exception:
+            pass
+
+        # 4. 检查真正的错误提示
         try:
             has_err = page.evaluate(r'''() => {
               const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
@@ -1663,12 +1695,6 @@ def _wait_after_otp(page, timeout: int = 14) -> str:
         except Exception:
             pass
 
-        # 若仍停留在 email-verification，每隔 2 秒尝试按一次 Enter 或触发一次提交
-        if time.time() - end + timeout > 3 and int(time.time()) % 2 == 0:
-            try:
-                page.keyboard.press("Enter")
-            except Exception:
-                pass
         time.sleep(0.25 if _fast_mode() else 0.5)
 
     if "email-verification" in _page_url(page).lower():
