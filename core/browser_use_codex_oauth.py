@@ -1199,13 +1199,37 @@ def _clear_phone_inputs(page) -> None:
         except Exception:
             pass
 
+def _split_country_and_local(phone: str) -> tuple[str, str]:
+    """拆分手机号为 (country_code, local_digits)。"""
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    if not digits:
+        return ("", "")
+    if digits.startswith("1") and len(digits) == 11:
+        return ("1", digits[1:])
+    if digits.startswith("7") and len(digits) == 11:
+        return ("7", digits[1:])
+    for cc in ("44", "86", "84", "81", "49", "33", "39", "62", "63", "91", "55", "52", "48", "31", "34", "46", "20", "27"):
+        if digits.startswith(cc) and len(digits) > len(cc) + 4:
+            return (cc, digits[len(cc):])
+    if len(digits) >= 10:
+        return (digits[:3], digits[3:])
+    return ("", digits)
+
+
 def _fill_phone(page, phone: str) -> str:
     phone_e164 = _phone_e164(phone)
     if not phone_e164:
         raise RuntimeError(f"手机号为空/格式无效：{phone!r}")
-    logger.info("[Codex][BrowserUse] 准备填写手机号 E.164：%s", phone_e164)
+    cc, local_digits = _split_country_and_local(phone_e164)
+    logger.info(
+        "[Codex][BrowserUse] 准备填写手机号：E164=%s 国码=%s 本地号=%s",
+        phone_e164,
+        cc or "-",
+        local_digits or "-",
+    )
     if not _wait_phone_form_ready(page, timeout=8):
         raise RuntimeError("找不到手机号输入框；" + _current_state_for_log(page))
+
     selectors = [
         "input[type='tel']",
         "input[name*='phone' i]",
@@ -1218,48 +1242,30 @@ def _fill_phone(page, phone: str) -> str:
     ]
     _clear_phone_inputs(page)
 
-    # 判断是否存在独立的国家码选择框（React Aria phone-code combobox）
-    has_code_input = _has_visible_phone_code_input(page)
-    # 有国家码框时，号码输入框只应填本地号（去掉国码前缀）
-    local_number = phone_e164
-    if has_code_input:
-        # 常见国码长度 1-3 位，逐级尝试剥离
-        digits = _phone_digits(phone_e164)
-        for cc_len in (3, 2, 1):
-            cc = digits[:cc_len]
-            if len(cc) == cc_len and len(digits) > cc_len:
-                local_number = "+" + digits
-                break
-        # 简化：默认剥离前 2 位国码（44/84/86 等）
-        if len(digits) > 3:
-            # UK=44 VN=84 CN=86 US=1: 试 2 位
-            local_number = "+" + digits[2:] if digits[:2] in ("44", "84", "86", "91", "62", "63", "81", "49", "33", "39", "55", "52", "48", "7") or len(digits[:2]) >= 2 and digits[0] in ("7",) else "+" + digits[1:]
-        logger.info(
-            "[Codex][BrowserUse] 检测到独立国家码框，填写本地号：%s (full=%s)",
-            local_number,
-            phone_e164,
-        )
+    # 优先尝试在输入框里填纯本地数字（OpenAI 等绝大多数带国家码选择器的表单均要求纯本地号）
+    # 若无有效本地号才填完整 E164
+    fill_candidates = []
+    if local_digits:
+        fill_candidates.append(local_digits)
+    fill_candidates.append(phone_e164)
 
-    # 真实键盘输入（React Aria 受控组件只认真实按键）
-    loc = _visible_locator_any_frame(page, selectors, timeout_ms=3500)
-    typed_ok = False
-    if loc is not None:
+    typed_success = False
+    for candidate in fill_candidates:
+        _clear_phone_inputs(page)
+        loc = _visible_locator_any_frame(page, selectors, timeout_ms=2500)
+        if loc is None:
+            continue
         try:
             loc.scroll_into_view_if_needed(timeout=1500)
         except Exception:
             pass
         try:
-            loc.click(timeout=2500)
+            loc.click(timeout=2000)
             page.keyboard.press("Control+A")
             page.keyboard.press("Backspace")
             _bu_delay("otp_input")
-            page.keyboard.type(local_number, delay=45)
-            typed_ok = True
-        except Exception as exc:
-            logger.debug("[Codex][BrowserUse] 键盘输入手机号异常：%s", exc)
-
-    if typed_ok:
-        try:
+            page.keyboard.type(candidate, delay=40)
+            # 触发受控组件更新
             page.evaluate(
                 """() => {
                   const els = [...document.querySelectorAll('input')].filter(el => el.offsetWidth > 5 && el.offsetHeight > 5);
@@ -1268,48 +1274,40 @@ def _fill_phone(page, phone: str) -> str:
                     if (/(phone|tel|電話|携帯)/i.test(hay) || el.type === 'tel') {
                       el.dispatchEvent(new Event('input', {bubbles: true}));
                       el.dispatchEvent(new Event('change', {bubbles: true}));
+                      el.dispatchEvent(new Event('blur', {bubbles: true}));
                     }
                   }
                 }"""
             )
-        except Exception:
-            pass
-        actual = _read_phone_input_value(page)
-        # 键盘输入后按本地号或全号匹配均可
-        if _phone_digits(actual) and (
-            _phone_digits(actual) == _phone_digits(phone_e164)
-            or _phone_digits(actual) == _phone_digits(local_number)
-        ):
-            logger.info("[Codex][BrowserUse] 键盘输入手机号成功：%r", actual)
-            _select_sms_channel(page)
-            if not _click_phone_continue(page):
-                try:
-                    page.keyboard.press("Enter")
-                except Exception:
-                    pass
-            return phone_e164
+            actual = _read_phone_input_value(page)
+            actual_digits = _phone_digits(actual)
+            cand_digits = _phone_digits(candidate)
+            if actual_digits and cand_digits in actual_digits:
+                logger.info(
+                    "[Codex][BrowserUse] 真实键盘输入手机号成功：input=%r (actual=%r)",
+                    candidate,
+                    actual,
+                )
+                typed_success = True
+                break
+        except Exception as exc:
+            logger.debug("[Codex][BrowserUse] 键盘输入手机号异常 candidate=%s: %s", candidate, exc)
 
-    # 回退：fill / JS 赋值
-    ok = _fill_first_any_frame(page, selectors, local_number, timeout_ms=3500)
-    if not ok:
-        ok = _force_set_phone_value(page, local_number)
-    if not ok:
-        raise RuntimeError("找不到手机号输入框；" + _current_state_for_log(page))
-
-    actual = _read_phone_input_value(page)
-    if _phone_digits(actual) != _phone_digits(local_number):
-        logger.warning(
-            "[Codex][BrowserUse] 手机号输入校验不一致，尝试强制重填：expected=%s actual=%r",
-            local_number,
-            actual,
-        )
-        _force_set_phone_value(page, local_number)
+    if not typed_success:
+        # 回退 JS 注入
+        fallback_val = local_digits or phone_e164
+        ok = _fill_first_any_frame(page, selectors, fallback_val, timeout_ms=3500)
+        if not ok:
+            ok = _force_set_phone_value(page, fallback_val)
+        if not ok:
+            raise RuntimeError("找不到手机号输入框；" + _current_state_for_log(page))
         actual = _read_phone_input_value(page)
-    if _phone_digits(actual) != _phone_digits(local_number):
-        raise RuntimeError(f"手机号未正确写入页面：expected={local_number}, actual={actual!r}")
-    logger.info("[Codex][BrowserUse] 页面手机号输入值：%r", actual)
+        logger.info("[Codex][BrowserUse] JS注入手机号完成：%r", actual)
 
     _select_sms_channel(page)
+    # 提交前主动关闭可能弹出的国家选择浮层
+    _dismiss_phone_country_dropdown(page)
+    time.sleep(0.3)
     if not _click_phone_continue(page):
         try:
             page.keyboard.press("Enter")
