@@ -1160,13 +1160,18 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
             if not _is_signup_password_page(page):
                 quick = _quick_auth_state(page)
                 if str(quick.get("state") or "") == "email_verification":
-                    if _click_continue_with_password_if_present(page):
-                        clicked_password_entry = True
-                        logger.info("[BrowserUse] 邮箱验证码页已点击“使用密码继续”，等待跳转到密码页：url=%s", quick.get("url") or _page_url(page) or "-")
-                        time.sleep(0.4 if _fast_mode() else 1.0)
+                    if not clicked_password_entry:
+                        if _click_continue_with_password_if_present(page):
+                            clicked_password_entry = True
+                            logger.info("[BrowserUse] 邮箱验证码页已点击“使用密码继续”，等待跳转到密码页：url=%s", quick.get("url") or _page_url(page) or "-")
+                            time.sleep(0.5 if _fast_mode() else 1.0)
+                            continue
+                        logger.info("[BrowserUse] 已在邮箱验证码页，未找到或无法点击使用密码继续，进入 OTP 阶段：url=%s", quick.get("url") or _page_url(page) or "-")
+                        return None
+                    else:
+                        # 之前已成功点击使用密码继续，页面正在向 /create-account/password 跳转，绝不能提前退出
+                        time.sleep(0.4 if _fast_mode() else 0.8)
                         continue
-                    logger.info("[BrowserUse] 已在邮箱验证码页，跳过密码页等待，直接进入 OTP 阶段：url=%s", quick.get("url") or _page_url(page) or "-")
-                    return None
         except Exception:
             pass
         if time.time() - last_heartbeat > 3:
@@ -1187,13 +1192,17 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
             logger.info("[BrowserUse] 检测密码/验证码页：state=%s url=%s", state, state_info.get("url") or "-")
             last_log = time.time()
         if state == "email_verification" and not _is_signup_password_page(page):
-            if _click_continue_with_password_if_present(page):
-                clicked_password_entry = True
-                logger.info("[BrowserUse] 邮箱验证码页已点击“使用密码继续”，等待跳转到密码页：email=%s", email)
-                time.sleep(0.4 if _fast_mode() else 1.0)
+            if not clicked_password_entry:
+                if _click_continue_with_password_if_present(page):
+                    clicked_password_entry = True
+                    logger.info("[BrowserUse] 邮箱验证码页已点击“使用密码继续”，等待跳转到密码页：email=%s", email)
+                    time.sleep(0.5 if _fast_mode() else 1.0)
+                    continue
+                logger.info("[BrowserUse] 邮箱提交已直接进入验证码页，跳过密码设置并直接进入 OTP 阶段：email=%s", email)
+                return None
+            else:
+                time.sleep(0.4 if _fast_mode() else 0.8)
                 continue
-            logger.info("[BrowserUse] 邮箱提交已直接进入验证码页，跳过密码设置并直接进入 OTP 阶段：email=%s", email)
-            return None
         if state not in ("password", "login_password"):
             # 已点击“使用密码继续”后页面需要时间跳转到 /create-account/password；
             # 此时绝不提前退出，最多等满 25s 直到密码页出现（否则密码永远填不上）。
@@ -2766,6 +2775,15 @@ def run_browser_use_registration(
                     state = str(state_info.get("state") or "other")
                     if "/log-in/password" in str(state_info.get("url") or _page_url(page) or "").lower() or state == "login_password":
                         raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={state_info.get('url') or _page_url(page) or 'https://auth.openai.com/log-in/password'}")
+                    # 自愈防呆：若检测到当前页面是创建密码页，立即就地完成密码填写与提交！
+                    if _is_signup_password_page(page) or state == "password" or "/create-account/password" in str(state_info.get("url") or _page_url(page) or "").lower():
+                        logger.info("[BrowserUse][OTP] 关键修正：检测到页面停留在密码创建页，就地执行密码设置：url=%s", state_info.get("url") or _page_url(page) or "-")
+                        pwd_res = _fill_password_if_present(page, email, timeout=20, context=context)
+                        if pwd_res:
+                            openai_password = pwd_res
+                            logger.info("[BrowserUse][OTP] 就地密码设置成功，继续等待跳转到验证码页")
+                            time.sleep(1.0)
+                            continue
                     if state == "email_verification":
                         logger.info("[BrowserUse][OTP] 已检测到验证码页：url=%s", state_info.get("url") or "-")
                         break
@@ -2775,6 +2793,10 @@ def run_browser_use_registration(
                         logger.info("[BrowserUse][OTP] 等待验证码输入页出现：state=%s url=%s", state, state_info.get("url") or "-")
                         last_verify_log = time.time()
                     time.sleep(0.2 if _fast_mode() else 0.4)
+
+                # 超时防呆：绝不能在密码页上强行执行 OTP 填入！
+                if _is_signup_password_page(page) or "/create-account/password" in _page_url(page).lower():
+                    raise RuntimeError(f"当前页面仍是创建密码页，未能进入验证码页，终止后续 OTP 流程以防误填: url={_page_url(page)}")
 
                 if current_otp is None:
                     logger.info("[BrowserUse][OTP] 等待验证码：%s（%s/%s）", email, otp_attempt, max_otp_attempts)
