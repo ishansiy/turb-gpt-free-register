@@ -1199,6 +1199,124 @@ def _clear_phone_inputs(page) -> None:
         except Exception:
             pass
 
+COUNTRY_KEYWORDS: dict[str, list[str]] = {
+    "44": ["+44", "イギリス", "United Kingdom", "UK", "Great Britain", "英国"],
+    "1": ["+1", "アメリカ合衆国", "United States", "USA", "US", "美国", "カナダ", "Canada"],
+    "86": ["+86", "中国", "China"],
+    "84": ["+84", "ベトナム", "Vietnam", "越南"],
+    "81": ["+81", "日本", "Japan"],
+    "49": ["+49", "ドイツ", "Germany", "德国"],
+    "33": ["+33", "フランス", "France", "法国"],
+    "39": ["+39", "イタリア", "Italy", "意大利"],
+    "62": ["+62", "インドネシア", "Indonesia", "印尼"],
+    "63": ["+63", "フィリピン", "Philippines", "菲律宾"],
+    "91": ["+91", "インド", "India", "印度"],
+    "55": ["+55", "ブラジル", "Brazil", "巴西"],
+    "52": ["+52", "メキシコ", "Mexico", "墨西哥"],
+    "48": ["+48", "ポーランド", "Poland", "波兰"],
+    "31": ["+31", "オランダ", "Netherlands", "荷兰"],
+    "34": ["+34", "スペイン", "Spain", "西班牙"],
+    "46": ["+46", "スウェーデン", "Sweden", "瑞典"],
+}
+
+
+def _ensure_phone_country_selected(page, country_code: str) -> bool:
+    """确保页面上的手机号国家码选择器切换到指定的国家（例如 44 -> イギリス (+44)）。"""
+    if not country_code:
+        return True
+    keywords = COUNTRY_KEYWORDS.get(country_code, [f"+{country_code}"])
+    target_pattern = f"+{country_code}"
+
+    # 1. 检查当前是否已经选中国家
+    check_script = r"""(pattern) => {
+        const els = [...document.querySelectorAll('button,[role=combobox],[role=button],span,div')].filter(el => {
+            const s = getComputedStyle(el);
+            return s.visibility !== 'hidden' && s.display !== 'none' && el.offsetWidth > 10 && el.offsetHeight > 10;
+        });
+        for (const el of els) {
+            const txt = (el.innerText || el.textContent || '').trim();
+            if (txt.includes(pattern) && (txt.includes('国コード') || txt.includes('Country') || txt.includes('('))) {
+                return true;
+            }
+        }
+        return false;
+    }"""
+    try:
+        if page.evaluate(check_script, target_pattern):
+            logger.info("[Codex][BrowserUse] 国家码已正确处于目标国家：+%s", country_code)
+            return True
+    except Exception:
+        pass
+
+    logger.info("[Codex][BrowserUse] 尝试切换手机号国家码为：+%s (关键字=%s)", country_code, keywords)
+
+    # 2. 找到国家选择器并点击展开
+    click_picker_script = r"""(keywords) => {
+        const els = [...document.querySelectorAll('button,[role=combobox],[role=button]')].filter(el => {
+            const s = getComputedStyle(el);
+            return s.visibility !== 'hidden' && s.display !== 'none' && el.offsetWidth > 10 && el.offsetHeight > 10;
+        });
+        for (const el of els) {
+            const txt = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
+            if (txt.includes('国コード') || txt.includes('Country code') || (txt.includes('(') && txt.includes('+') && txt.includes(')'))) {
+                el.scrollIntoView({block: 'center'});
+                el.click();
+                return true;
+            }
+        }
+        return false;
+    }"""
+    try:
+        opened = bool(page.evaluate(click_picker_script, keywords))
+        if opened:
+            time.sleep(0.6)
+    except Exception as exc:
+        logger.debug("[Codex][BrowserUse] 点击国家选择器异常: %s", exc)
+
+    # 3. 在下拉列表中定位并点击目标国家
+    select_option_script = r"""(keywords) => {
+        const options = [...document.querySelectorAll('[role=option],li,button,div')].filter(el => {
+            const s = getComputedStyle(el);
+            return s.visibility !== 'hidden' && s.display !== 'none' && el.offsetWidth > 10;
+        });
+        for (const kw of keywords) {
+            for (const opt of options) {
+                const txt = (opt.innerText || opt.textContent || '').trim();
+                if (txt.includes(kw)) {
+                    opt.scrollIntoView({block: 'center'});
+                    opt.click();
+                    return {ok: true, text: txt};
+                }
+            }
+        }
+        return {ok: false};
+    }"""
+    try:
+        res = page.evaluate(select_option_script, keywords)
+        if res and res.get("ok"):
+            logger.info("[Codex][BrowserUse] 成功选中目标国家选项: %r", res.get("text"))
+            time.sleep(0.4)
+            _dismiss_phone_country_dropdown(page)
+            return True
+    except Exception as exc:
+        logger.debug("[Codex][BrowserUse] 选择国家选项异常: %s", exc)
+
+    # 4. 如果没直接点中，尝试通过键盘输入关键词过滤并回车
+    try:
+        search_kw = keywords[1] if len(keywords) > 1 else keywords[0]
+        page.keyboard.type(search_kw, delay=30)
+        time.sleep(0.4)
+        page.keyboard.press("Enter")
+        time.sleep(0.4)
+        _dismiss_phone_country_dropdown(page)
+        return True
+    except Exception:
+        pass
+
+    _dismiss_phone_country_dropdown(page)
+    return False
+
+
 def _split_country_and_local(phone: str) -> tuple[str, str]:
     """拆分手机号为 (country_code, local_digits)。"""
     digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
@@ -1229,6 +1347,10 @@ def _fill_phone(page, phone: str) -> str:
     )
     if not _wait_phone_form_ready(page, timeout=8):
         raise RuntimeError("找不到手机号输入框；" + _current_state_for_log(page))
+
+    # 关键步骤：先确保国家码选择器切换到目标国家（如英国 +44），避免被当成美国 +1 号码校验拦截
+    if cc:
+        _ensure_phone_country_selected(page, cc)
 
     selectors = [
         "input[type='tel']",
