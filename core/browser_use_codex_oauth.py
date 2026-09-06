@@ -1262,11 +1262,20 @@ def _read_selected_country_text(page) -> str:
 
 def _ensure_phone_country_selected(page, country_code: str) -> bool:
     """把页面手机号国家码选择器切换到指定国家（如 44 -> イギリス (+44)）。
-    用 Playwright 真实鼠标事件点击，React Aria 组件才认；切换后回读验证。"""
+    用真实鼠标坐标点击（React Aria 只认 pointer 事件），搜索框过滤 + 全局 option 兜底，切换后回读验证。"""
+    import json as _json
+
     if not country_code:
         return True
     target = f"+{country_code}"
     keywords = COUNTRY_KEYWORDS.get(country_code, [target])
+    # 搜索框里尝试的关键词（英文名优先，其次本地化名/数字）
+    search_terms = []
+    for k in keywords:
+        if k.startswith("+"):
+            continue
+        search_terms.append(k)
+    search_terms.append(target.lstrip("+"))
 
     cur = _read_selected_country_text(page)
     if target in cur:
@@ -1274,86 +1283,116 @@ def _ensure_phone_country_selected(page, country_code: str) -> bool:
         return True
     logger.info("[Codex][BrowserUse] 当前国家码=%r，需切换到 +%s", cur or "-", country_code)
 
-    # 展开国家选择器（真实点击）
-    picker = None
-    for sel in [
-        "button:has-text('(+')",
-        "[role=combobox]",
-        "button[aria-haspopup='listbox']",
-        "button[aria-haspopup='dialog']",
-    ]:
-        try:
-            loc = page.locator(sel).first
-            if loc.count() > 0 and loc.is_visible():
-                picker = loc
-                break
-        except Exception:
-            continue
-    if picker is None:
-        try:
-            idx = page.evaluate(r"""() => {
-                const els = [...document.querySelectorAll('button,[role=combobox],[role=button]')];
-                for (let i=0;i<els.length;i++){
-                    const t=(els[i].innerText||els[i].textContent||'').trim();
-                    if (/\(\+\d{1,3}\)/.test(t) && t.length<60) return i;
-                }
-                return -1;
-            }""")
-            if idx is not None and idx >= 0:
-                picker = page.locator("button,[role=combobox],[role=button]").nth(int(idx))
-        except Exception:
-            pass
-    if picker is None:
+    # 1) 用真实坐标点击 combobox 打开下拉
+    box = page.evaluate(r"""() => {
+        const els=[...document.querySelectorAll('button,[role=combobox],[role=button]')];
+        for(const el of els){
+            const s=getComputedStyle(el);
+            if(s.visibility==='hidden'||s.display==='none') continue;
+            const t=(el.innerText||el.textContent||'').trim();
+            if(/\(\+\d{1,3}\)/.test(t)&&t.length<60){
+                const r=el.getBoundingClientRect();
+                if(r.width>5&&r.height>5) return {x:r.x+r.width/2,y:r.y+r.height/2,text:t};
+            }
+        }
+        return null;
+    }""")
+    if not box:
         logger.warning("[Codex][BrowserUse] 找不到国家码选择器，保持默认国码")
         return False
     try:
-        picker.scroll_into_view_if_needed(timeout=2000)
-        picker.click(timeout=3000)
-        time.sleep(0.7)
+        page.mouse.click(box["x"], box["y"])
+        time.sleep(1.0)
     except Exception as exc:
-        logger.debug("[Codex][BrowserUse] 点击国家选择器失败: %s", exc)
+        logger.warning("[Codex][BrowserUse] 点击国家选择器异常: %s", exc)
         return False
 
-    # 在展开的列表里真实点击目标国家选项（文本短，排除整个容器）
-    clicked = False
-    for kw in [target] + [k for k in keywords if k != target]:
-        try:
-            opts = page.locator("[role=option], [role=listbox] li, [role=listbox] button, [role=menuitem], [role=listbox] div")
-            n = opts.count()
-            for i in range(n):
-                o = opts.nth(i)
-                try:
-                    if not o.is_visible():
-                        continue
-                    txt = (o.inner_text() or "").strip()
-                    if not txt or len(txt) > 60:
-                        continue
-                    if kw in txt:
-                        o.scroll_into_view_if_needed(timeout=1500)
-                        o.click(timeout=2500)
-                        clicked = True
-                        logger.info("[Codex][BrowserUse] 已点击国家选项: %r (kw=%s)", txt, kw)
-                        break
-                except Exception:
-                    continue
-            if clicked:
-                break
-        except Exception:
-            continue
+    # 诊断：展开后的 option 与 input 结构（失败时据此定位真实 DOM）
+    try:
+        diag = page.evaluate(r"""() => {
+            const opts=[...document.querySelectorAll('[role=option],li,[role=menuitem]')].filter(el=>{
+                const s=getComputedStyle(el);
+                return s.visibility!=='hidden'&&s.display!=='none'&&el.offsetWidth>5;
+            });
+            const optSamples=opts.slice(0,6).map(el=>(el.innerText||el.textContent||'').trim().slice(0,30));
+            const inputs=[...document.querySelectorAll('input')].filter(el=>{
+                const s=getComputedStyle(el);
+                const vis=s.visibility!=='hidden'&&s.display!=='none'&&el.offsetWidth>5;
+                const t=(el.type||'').toLowerCase();
+                const hay=((el.name||'')+(el.id||'')+(el.placeholder||'')+(el.getAttribute('aria-label')||'')).toLowerCase();
+                const isPhone=t==='tel'||/phone|tel|電話|携帯/.test(hay);
+                return vis&&!isPhone;
+            });
+            const inputSamples=inputs.slice(0,4).map(el=>({type:el.type,ph:el.placeholder||'',al:el.getAttribute('aria-label')||''}));
+            return {optCount:opts.length, optSamples, inputCount:inputs.length, inputSamples};
+        }""")
+        logger.warning("[Codex][BrowserUse][国家码诊断] %s", _json.dumps(diag, ensure_ascii=False)[:600])
+    except Exception:
+        pass
 
-    # 列表项没点中 -> 用搜索框过滤后回车
-    if not clicked:
+    def _find_option_coord(kws):
+        return page.evaluate(r"""(kws) => {
+            const opts=[...document.querySelectorAll('[role=option],li,[role=menuitem]')].filter(el=>{
+                const s=getComputedStyle(el);
+                return s.visibility!=='hidden'&&s.display!=='none'&&el.offsetWidth>5;
+            });
+            for(const el of opts){
+                const t=(el.innerText||el.textContent||'').trim();
+                if(!t||t.length>60) continue;
+                for(const kw of kws){ if(t.includes(kw)){ const r=el.getBoundingClientRect(); if(r.width>2&&r.height>2) return {x:r.x+r.width/2,y:r.y+r.height/2,text:t}; } }
+            }
+            return null;
+        }""", kws)
+
+    match_kws = [target, "イギリス", "United Kingdom", "UK", "GBR", "英国"]
+
+    # 2) 优先：搜索框过滤后点击匹配项
+    picked = False
+    search_box = page.evaluate(r"""() => {
+        const inputs=[...document.querySelectorAll('input')].filter(el=>{
+            const s=getComputedStyle(el);
+            const vis=s.visibility!=='hidden'&&s.display!=='none'&&el.offsetWidth>5;
+            const t=(el.type||'').toLowerCase();
+            const hay=((el.name||'')+(el.id||'')+(el.placeholder||'')+(el.getAttribute('aria-label')||'')).toLowerCase();
+            const isPhone=t==='tel'||/phone|tel|電話|携帯/.test(hay);
+            return vis&&!isPhone;
+        });
+        if(!inputs.length) return null;
+        const r=inputs[0].getBoundingClientRect();
+        return {x:r.x+r.width/2,y:r.y+r.height/2};
+    }""")
+    if search_box:
         try:
-            search = page.locator("input[type=search], [role=dialog] input[type=text], [role=combobox] input").first
-            if search.count() > 0 and search.is_visible():
-                search.click(timeout=2000)
-                page.keyboard.type(keywords[1] if len(keywords) > 1 else target, delay=30)
-                time.sleep(0.5)
+            page.mouse.click(search_box["x"], search_box["y"])
+            time.sleep(0.3)
+            for term in search_terms:
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+                page.keyboard.type(term, delay=25)
+                time.sleep(0.7)
+                hit = _find_option_coord(match_kws)
+                if hit:
+                    page.mouse.click(hit["x"], hit["y"])
+                    logger.info("[Codex][BrowserUse] 搜索过滤后点击国家选项: %r (term=%s)", hit["text"], term)
+                    picked = True
+                    break
+            if not picked:
                 page.keyboard.press("Enter")
-                clicked = True
-                logger.info("[Codex][BrowserUse] 通过搜索框选择国家")
-        except Exception:
-            pass
+                picked = True
+                logger.info("[Codex][BrowserUse] 搜索框无匹配项，回车选中高亮项")
+        except Exception as exc:
+            logger.debug("[Codex][BrowserUse] 搜索框选择异常: %s", exc)
+
+    # 3) 兜底：全局找匹配 option 坐标点击
+    if not picked:
+        hit = _find_option_coord(match_kws)
+        if hit:
+            try:
+                page.mouse.click(hit["x"], hit["y"])
+                logger.info("[Codex][BrowserUse] 全局点击国家选项: %r", hit["text"])
+                picked = True
+            except Exception:
+                pass
 
     time.sleep(0.5)
     _dismiss_phone_country_dropdown(page)
