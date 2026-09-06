@@ -925,6 +925,25 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
             error_code = str(outcome).split(":", 1)[1] or "account_deactivated"
             raise AccountUnusableError(f"账号已废（{error_code}）", error_code=error_code)
         if outcome in ("accepted", "callback", "unknown"):
+            # OTP 通过后，OpenAI 有时把“登录密码”当作第二因子，跳到 /log-in/password。
+            # 注册时已设过密码，这里短暂探测并补填，否则主流程会卡在密码页等 callback 超时。
+            pw_end = time.time() + 10
+            hit_pwd = False
+            while time.time() < pw_end:
+                u = (_page_url(page) or "").lower()
+                if "/log-in/password" in u:
+                    hit_pwd = True
+                    break
+                if _is_callback_url(u) or any(x in u for x in ("workspace", "consent", "authorize", "add-phone", "phone-verification")):
+                    break
+                time.sleep(0.5)
+            if hit_pwd:
+                logger.info("[Codex][BrowserUse] OTP 后进入登录密码页，补填密码：url=%s", _page_url(page))
+                pw2 = _fill_login_password_if_present(page, email, timeout=25)
+                if pw2 == "email_otp":
+                    logger.info("[Codex][BrowserUse] 补填密码后再次要求邮箱 OTP，进入下一轮")
+                    continue
+                return
             return
         if attempt >= 3:
             raise RuntimeError("Codex 邮箱验证码连续错误/过期")
