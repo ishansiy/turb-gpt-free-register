@@ -782,7 +782,7 @@ def _fill_login_password_if_present(page, email: str, timeout: int = 18) -> str 
             except Exception:
                 pass
         logger.info("[Codex][BrowserUse] 已填写并提交登录密码：%s", email)
-        wait_end = time.time() + 12
+        wait_end = time.time() + 28
         while time.time() < wait_end:
             if _looks_mfa_challenge_page(page):
                 _fill_mfa_challenge_if_present(page, email, timeout=15)
@@ -820,12 +820,20 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
         _fill_email_for_codex(page, email)
         _t_email.done()
         logger.info("[Codex][BrowserUse] 已提交邮箱：%s", email)
-        pw_result = _fill_login_password_if_present(page, email, timeout=18)
+        pw_result = _fill_login_password_if_present(page, email, timeout=25)
         if pw_result == "next_step":
             if _looks_mfa_challenge_page(page):
                 _fill_mfa_challenge_if_present(page, email, timeout=15)
-            logger.info("[Codex][BrowserUse] 账号已用密码完成登录，直接进入后续步骤")
-            return
+            # OpenAI 三段式登录：邮箱 -> 密码 -> 再发一轮邮箱 OTP（第二因子）。
+            # 若提交密码后落在邮箱验证码页，不能提前返回，必须落入下方 OTP 循环处理。
+            if _looks_email_otp_page(page):
+                # 注意：不要重置 otp_after_ts——第二轮 OTP 邮件在密码提交后数秒即到达，
+                # 重置会把新验证码当"过旧邮件"过滤掉。沿用函数开头的时间戳即可，
+                # 第一轮验证码已由 used_codes 排除。
+                logger.info("[Codex][BrowserUse] 密码提交后进入第二轮邮箱验证码页，继续走邮箱 OTP 循环")
+            else:
+                logger.info("[Codex][BrowserUse] 账号已用密码完成登录，直接进入后续步骤")
+                return
         if pw_result != "email_otp":
             if _looks_mfa_challenge_page(page):
                 _fill_mfa_challenge_if_present(page, email, timeout=15)
