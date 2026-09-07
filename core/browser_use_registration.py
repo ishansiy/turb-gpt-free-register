@@ -2904,6 +2904,16 @@ def run_browser_use_registration(
                     browser = None
                     context = None
                     page = None
+                    if openai_password:
+                        try:
+                            from core.codex_oauth import register_pending_registration_password
+                            register_pending_registration_password(email, openai_password)
+                            logger.info(
+                                "[BrowserUse][Codex] 已暂存注册密码（%s 位）供自动授权补填登录密码页",
+                                len(openai_password),
+                            )
+                        except Exception as _reg_exc:
+                            logger.debug("[BrowserUse][Codex] 暂存注册密码失败：%s", _reg_exc)
                     from core.codex_oauth import run_codex_oauth
                     codex_result = run_codex_oauth(email, otp_provider=wait_for_otp, proxy=proxy, force=True)
                 else:

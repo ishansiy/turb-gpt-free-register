@@ -109,8 +109,22 @@ def _codex_result(
     }
 
 
+_PENDING_REGISTRATION_PASSWORDS: dict[str, str] = {}
+
+
+def register_pending_registration_password(email: str, password: str) -> None:
+    """账号注册成功但尚未写库前，暂存密码供同进程的 Codex OAuth 使用。"""
+    key = str(email or "").strip().lower()
+    if not key or not password:
+        return
+    _PENDING_REGISTRATION_PASSWORDS[key] = str(password)
+
+
 def _account_registration_password(email: str) -> str:
     """读取账号的注册密码；不存在则返回空字符串。"""
+    pending = _PENDING_REGISTRATION_PASSWORDS.get(str(email or "").strip().lower(), "")
+    if pending:
+        return pending
     try:
         acc = db.get_account_by_email(email)
         if not acc:
