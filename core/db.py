@@ -11,6 +11,7 @@
 """
 import hashlib
 import json
+import logging
 import sqlite3
 import threading
 import uuid
@@ -18,6 +19,8 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DATA_DIR = _PROJECT_ROOT
@@ -2063,13 +2066,29 @@ def release_generic_api_email(email: str, status: str = "available", note: str |
 
 
 def release_unconsumed_generic_api_email(email: str, note: str | None = None) -> bool:
-    """原子回收未生成本地账号且仍为 used 的通用 API 邮箱。"""
+    """原子回收未生成本地账号且仍为 used 的通用 API 邮箱。
+
+    同一邮箱失败满 _GENERIC_EMAIL_MAX_RELEASES（2）次后转为 failed，
+    防止 claim（按 id 最小 available 领取）反复抽中同一个坏邮箱形成死循环。
+    """
+    _GENERIC_EMAIL_MAX_RELEASES = 2
     with _LOCK:
         if _find_by_email(_load_accounts(), email) is not None:
             return False
         rows = _load_generic_api_emails()
         row = _find_by_email(rows, email)
         if row is None or row.get("status") != "used":
+            return False
+        fails = int(row.get("release_count") or 0) + 1
+        row["release_count"] = fails
+        if fails >= _GENERIC_EMAIL_MAX_RELEASES:
+            row["status"] = "failed"
+            row["used_at"] = row.get("used_at") or _now()
+            row["note"] = (note or "")[:180] or f"连续失败 {fails} 次，自动停用"
+            _save_generic_api_emails(rows)
+            logger.warning(
+                "[DB] 通用 API 邮箱 %s 已失败 %s 次，转为 failed 不再回收", email, fails
+            )
             return False
         row["status"] = "available"
         row["used_at"] = None
