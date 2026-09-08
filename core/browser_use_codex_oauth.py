@@ -1270,20 +1270,20 @@ def _read_selected_country_text(page) -> str:
 
 def _ensure_phone_country_selected(page, country_code: str) -> bool:
     """把页面手机号国家码选择器切换到指定国家（如 44 -> イギリス (+44)）。
-    用真实鼠标坐标点击（React Aria 只认 pointer 事件），搜索框过滤 + 全局 option 兜底，切换后回读验证。"""
+
+    三层策略，全部绕开"选项在视口外点不到"的问题：
+    A. 原生 <select>：JS 设 selectedIndex + 派发 input/change 事件（最可靠）
+    B. React Aria combobox：真实点击打开后，键盘 ArrowDown 逐项导航，
+       通过 aria-activedescendant 读高亮项，匹配 +{cc} 按 Enter
+    C. 失败时 dump 下拉机制日志辅助诊断
+    切换后统一回读验证。
+    """
     import json as _json
 
     if not country_code:
         return True
     target = f"+{country_code}"
     keywords = COUNTRY_KEYWORDS.get(country_code, [target])
-    # 搜索框里尝试的关键词（英文名优先，其次本地化名/数字）
-    search_terms = []
-    for k in keywords:
-        if k.startswith("+"):
-            continue
-        search_terms.append(k)
-    search_terms.append(target.lstrip("+"))
 
     cur = _read_selected_country_text(page)
     if target in cur:
@@ -1291,129 +1291,142 @@ def _ensure_phone_country_selected(page, country_code: str) -> bool:
         return True
     logger.info("[Codex][BrowserUse] 当前国家码=%r，需切换到 +%s", cur or "-", country_code)
 
-    # 1) 用真实坐标点击 combobox 打开下拉
-    box = page.evaluate(r"""() => {
-        const els=[...document.querySelectorAll('button,[role=combobox],[role=button]')];
-        for(const el of els){
-            const s=getComputedStyle(el);
-            if(s.visibility==='hidden'||s.display==='none') continue;
-            const t=(el.innerText||el.textContent||'').trim();
-            if(/\(\+\d{1,3}\)/.test(t)&&t.length<60){
-                const r=el.getBoundingClientRect();
-                if(r.width>5&&r.height>5) return {x:r.x+r.width/2,y:r.y+r.height/2,text:t};
-            }
-        }
-        return null;
-    }""")
-    if not box:
-        logger.warning("[Codex][BrowserUse] 找不到国家码选择器，保持默认国码")
-        return False
+    # ---- A. 原生 <select>（body 全量国家文本就是它的特征） ----
     try:
-        page.mouse.click(box["x"], box["y"])
-        time.sleep(1.0)
-    except Exception as exc:
-        logger.warning("[Codex][BrowserUse] 点击国家选择器异常: %s", exc)
-        return False
-
-    # 诊断：展开后的 option 与 input 结构（失败时据此定位真实 DOM）
-    try:
-        diag = page.evaluate(r"""() => {
-            const opts=[...document.querySelectorAll('[role=option],li,[role=menuitem]')].filter(el=>{
-                const s=getComputedStyle(el);
-                return s.visibility!=='hidden'&&s.display!=='none'&&el.offsetWidth>5;
-            });
-            const optSamples=opts.slice(0,6).map(el=>(el.innerText||el.textContent||'').trim().slice(0,30));
-            const inputs=[...document.querySelectorAll('input')].filter(el=>{
-                const s=getComputedStyle(el);
-                const vis=s.visibility!=='hidden'&&s.display!=='none'&&el.offsetWidth>5;
-                const t=(el.type||'').toLowerCase();
-                const hay=((el.name||'')+(el.id||'')+(el.placeholder||'')+(el.getAttribute('aria-label')||'')).toLowerCase();
-                const isPhone=t==='tel'||/phone|tel|電話|携帯/.test(hay);
-                return vis&&!isPhone;
-            });
-            const inputSamples=inputs.slice(0,4).map(el=>({type:el.type,ph:el.placeholder||'',al:el.getAttribute('aria-label')||''}));
-            return {optCount:opts.length, optSamples, inputCount:inputs.length, inputSamples};
-        }""")
-        logger.warning("[Codex][BrowserUse][国家码诊断] %s", _json.dumps(diag, ensure_ascii=False)[:600])
-    except Exception:
-        pass
-
-    def _find_option_coord(kws):
-        return page.evaluate(r"""(kws) => {
-            const opts=[...document.querySelectorAll('[role=option],li,[role=menuitem]')].filter(el=>{
-                const s=getComputedStyle(el);
-                return s.visibility!=='hidden'&&s.display!=='none'&&el.offsetWidth>5;
-            });
-            for(const el of opts){
-                const t=(el.innerText||el.textContent||'').trim();
-                if(!t||t.length>60) continue;
-                for(const kw of kws){ if(t.includes(kw)){ const r=el.getBoundingClientRect(); if(r.width>2&&r.height>2) return {x:r.x+r.width/2,y:r.y+r.height/2,text:t}; } }
+        sel_info = page.evaluate(r"""() => {
+            for (const s of document.querySelectorAll('select')) {
+                const opts = [...s.options];
+                const texts = opts.map(o => (o.textContent||'').trim());
+                if (texts.some(t => /\(\+\d{1,3}\)/.test(t)) || opts.length > 30) {
+                    return {idx: Array.from(document.querySelectorAll('select')).indexOf(s),
+                            count: opts.length, sample: texts.slice(0,3)};
+                }
             }
             return null;
-        }""", kws)
+        }""")
+        if sel_info:
+            picked = page.evaluate(r"""(target) => {
+                const sels = document.querySelectorAll('select');
+                for (const s of sels) {
+                    for (let i = 0; i < s.options.length; i++) {
+                        const t = (s.options[i].textContent || '').trim();
+                        if (t.includes(target)) {
+                            s.focus();
+                            s.selectedIndex = i;
+                            s.dispatchEvent(new Event('input', {bubbles: true}));
+                            s.dispatchEvent(new Event('change', {bubbles: true}));
+                            return t;
+                        }
+                    }
+                }
+                return null;
+            }""", target)
+            if picked:
+                time.sleep(0.8)
+                cur2 = _read_selected_country_text(page)
+                if target in cur2:
+                    logger.info("[Codex][BrowserUse] 国家码已通过原生select切换成功：+%s", country_code)
+                    return True
+                logger.info("[Codex][BrowserUse] 原生select已选中 %r 但显示未变(%r)，尝试继续", picked, cur2)
+    except Exception as exc:
+        logger.debug("[Codex][BrowserUse] 原生select检测异常：%s", exc)
 
-    match_kws = [target, "イギリス", "United Kingdom", "UK", "GBR", "英国"]
+    # ---- B. React Aria combobox：真实点击打开 + 键盘导航 ----
+    try:
+        box = page.evaluate(r"""() => {
+            const els = [...document.querySelectorAll('button,[role=combobox],[role=button]')];
+            for (const el of els) {
+                const s = getComputedStyle(el);
+                if (s.visibility === 'hidden' || s.display === 'none') continue;
+                const t = (el.innerText || el.textContent || '').trim();
+                if (/\(\+\d{1,3}\)/.test(t) && t.length < 60) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 5 && r.height > 5) return {x: r.x + r.width/2, y: r.y + r.height/2, text: t};
+                }
+            }
+            return null;
+        }""")
+        if not box:
+            logger.warning("[Codex][BrowserUse] 找不到国家码选择器（非select非combobox）")
+            _dump_country_picker_mechanism(page)
+            return False
 
-    # 2) 优先：搜索框过滤后点击匹配项
-    picked = False
-    search_box = page.evaluate(r"""() => {
-        const inputs=[...document.querySelectorAll('input')].filter(el=>{
-            const s=getComputedStyle(el);
-            const vis=s.visibility!=='hidden'&&s.display!=='none'&&el.offsetWidth>5;
-            const t=(el.type||'').toLowerCase();
-            const hay=((el.name||'')+(el.id||'')+(el.placeholder||'')+(el.getAttribute('aria-label')||'')).toLowerCase();
-            const isPhone=t==='tel'||/phone|tel|電話|携帯/.test(hay);
-            return vis&&!isPhone;
-        });
-        if(!inputs.length) return null;
-        const r=inputs[0].getBoundingClientRect();
-        return {x:r.x+r.width/2,y:r.y+r.height/2};
-    }""")
-    if search_box:
-        try:
-            page.mouse.click(search_box["x"], search_box["y"])
-            time.sleep(0.3)
-            for term in search_terms:
-                page.keyboard.press("Control+A")
-                page.keyboard.press("Backspace")
-                page.keyboard.type(term, delay=25)
-                time.sleep(0.7)
-                hit = _find_option_coord(match_kws)
-                if hit:
-                    page.mouse.click(hit["x"], hit["y"])
-                    logger.info("[Codex][BrowserUse] 搜索过滤后点击国家选项: %r (term=%s)", hit["text"], term)
-                    picked = True
-                    break
-            if not picked:
+        page.mouse.click(box["x"], box["y"])
+        time.sleep(1.0)
+
+        # 键盘导航：逐项 ArrowDown，读 aria-activedescendant 高亮项
+        max_steps = 240
+        for step in range(max_steps):
+            hl = page.evaluate(r"""() => {
+                const cb = document.querySelector('[role=combobox][aria-activedescendant], [aria-activedescendant]');
+                if (cb) {
+                    const id = cb.getAttribute('aria-activedescendant');
+                    if (id) {
+                        const el = document.getElementById(id) || document.querySelector(`[id="${id}"]`);
+                        if (el) return (el.innerText || el.textContent || '').trim();
+                    }
+                }
+                // 无 aria 时取视口内高亮 option
+                const hlEl = document.querySelector('[role=option][aria-selected=true], li.highlight, [role=option][data-highlighted]');
+                if (hlEl) return (hlEl.innerText || '').trim();
+                return null;
+            }""")
+            if hl and target in hl:
                 page.keyboard.press("Enter")
-                picked = True
-                logger.info("[Codex][BrowserUse] 搜索框无匹配项，回车选中高亮项")
-        except Exception as exc:
-            logger.debug("[Codex][BrowserUse] 搜索框选择异常: %s", exc)
+                time.sleep(0.8)
+                cur3 = _read_selected_country_text(page)
+                if target in cur3:
+                    logger.info("[Codex][BrowserUse] 国家码已通过键盘导航选中：+%s (高亮=%r)", country_code, hl[:40])
+                    return True
+                logger.info("[Codex][BrowserUse] Enter后显示未变(%r)，重试继续", cur3)
+                break
+            page.keyboard.press("ArrowDown")
+            time.sleep(0.05)
 
-    # 3) 兜底：全局找匹配 option 坐标点击
-    if not picked:
-        hit = _find_option_coord(match_kws)
-        if hit:
-            try:
-                page.mouse.click(hit["x"], hit["y"])
-                logger.info("[Codex][BrowserUse] 全局点击国家选项: %r", hit["text"])
-                picked = True
-            except Exception:
-                pass
+        # 键盘导航失败，兜底：搜索框输入国名过滤
+        try:
+            page.keyboard.type(keywords[0] if keywords and not keywords[0].startswith("+") else country_code, delay=20)
+            time.sleep(0.8)
+            page.keyboard.press("Enter")
+            time.sleep(1.0)
+            cur4 = _read_selected_country_text(page)
+            if target in cur4:
+                logger.info("[Codex][BrowserUse] 国家码已通过搜索过滤选中：+%s", country_code)
+                return True
+        except Exception:
+            pass
 
-    time.sleep(0.5)
-    _dismiss_phone_country_dropdown(page)
-    time.sleep(0.3)
+        _dump_country_picker_mechanism(page)
+    except Exception as exc:
+        logger.warning("[Codex][BrowserUse] combobox切换异常：%s", exc)
 
-    cur2 = _read_selected_country_text(page)
-    ok = target in cur2
-    if ok:
-        logger.info("[Codex][BrowserUse] 国家码切换成功：+%s (显示=%r)", country_code, cur2)
-    else:
-        logger.warning("[Codex][BrowserUse] 国家码切换后仍非目标：期望+%s 实际=%r", country_code, cur2 or "-")
-    return ok
+    cur5 = _read_selected_country_text(page)
+    if target in cur5:
+        return True
+    logger.warning("[Codex][BrowserUse] 国家码未能确认切换到 +%s，继续尝试填写本地号", country_code)
+    return False
 
+
+def _dump_country_picker_mechanism(page):
+    """失败时 dump 国家选择器机制，辅助诊断。"""
+    try:
+        diag = page.evaluate(r"""() => {
+            const out = {selectCount: document.querySelectorAll('select').length,
+                         comboboxes: [], radios: []};
+            for (const b of document.querySelectorAll('[role=combobox], button')) {
+                const t = (b.innerText || '').trim();
+                if (/\(\+\d{1,3}\)/.test(t) && t.length < 60) {
+                    out.comboboxes.push({tag: b.tagName, role: b.getAttribute('role'), text: t.slice(0, 40)});
+                }
+            }
+            for (const r of document.querySelectorAll('input[type=radio]')) {
+                out.radios.push({name: r.name, label: (r.getAttribute('aria-label') || '').slice(0, 30), checked: r.checked});
+            }
+            return out;
+        }""")
+        logger.warning("[Codex][BrowserUse][国家选择器机制] %s", str(diag)[:500])
+    except Exception:
+        pass
 
 def _split_country_and_local(phone: str) -> tuple[str, str]:
     """拆分手机号为 (country_code, local_digits)。"""
