@@ -1244,6 +1244,17 @@ COUNTRY_KEYWORDS: dict[str, list[str]] = {
     "31": ["+31", "オランダ", "Netherlands", "荷兰"],
     "34": ["+34", "スペイン", "Spain", "西班牙"],
     "46": ["+46", "スウェーデン", "Sweden", "瑞典"],
+    "57": ["+57", "コロンビア", "Colombia", "哥伦比亚"],
+    "56": ["+56", "チリ", "Chile", "智利"],
+    "54": ["+54", "アルゼンチン", "Argentina", "阿根廷"],
+    "51": ["+51", "ペルー", "Peru", "秘鲁"],
+    "7": ["+7", "ロシア", "Russia", "俄罗斯", "カザフスタン", "Kazakhstan", "哈萨克斯坦"],
+    "66": ["+66", "タイ", "Thailand", "泰国"],
+    "60": ["+60", "マレーシア", "Malaysia", "马来西亚"],
+    "27": ["+27", "南アフリカ", "South Africa", "南非"],
+    "254": ["+254", "ケニア", "Kenya", "肯尼亚"],
+    "380": ["+380", "ウクライナ", "Ukraine", "乌克兰"],
+    "852": ["+852", "香港", "Hong Kong", "ホンコン"],
 }
 
 
@@ -1291,45 +1302,50 @@ def _ensure_phone_country_selected(page, country_code: str) -> bool:
         return True
     logger.info("[Codex][BrowserUse] 当前国家码=%r，需切换到 +%s", cur or "-", country_code)
 
-    # ---- A. 原生 <select>（body 全量国家文本就是它的特征） ----
+    # ---- A. 原生 <select>：遍历所有 select，任何 option 文本匹配目标国码/国名即设值 ----
     try:
-        sel_info = page.evaluate(r"""() => {
-            for (const s of document.querySelectorAll('select')) {
-                const opts = [...s.options];
-                const texts = opts.map(o => (o.textContent||'').trim());
-                if (texts.some(t => /\(\+\d{1,3}\)/.test(t)) || opts.length > 30) {
-                    return {idx: Array.from(document.querySelectorAll('select')).indexOf(s),
-                            count: opts.length, sample: texts.slice(0,3)};
-                }
-            }
-            return null;
-        }""")
-        if sel_info:
-            picked = page.evaluate(r"""(target) => {
+        picked = page.evaluate(
+            r"""(args) => {
+                const target = args.target;
+                const names = args.names;
                 const sels = document.querySelectorAll('select');
+                const hits = [];
                 for (const s of sels) {
                     for (let i = 0; i < s.options.length; i++) {
                         const t = (s.options[i].textContent || '').trim();
-                        if (t.includes(target)) {
+                        const v = (s.options[i].value || '').trim();
+                        const textHit = t.includes(target) || names.some(n => n && t === n)
+                                        || names.some(n => n && t.includes(n));
+                        const valHit = v === target.replace('+', '') || v.includes(target);
+                        if (textHit || valHit) {
                             s.focus();
                             s.selectedIndex = i;
                             s.dispatchEvent(new Event('input', {bubbles: true}));
                             s.dispatchEvent(new Event('change', {bubbles: true}));
-                            return t;
+                            hits.push({optText: t, optVal: v, selOptCount: s.options.length});
                         }
                     }
                 }
-                return null;
-            }""", target)
-            if picked:
-                time.sleep(0.8)
-                cur2 = _read_selected_country_text(page)
-                if target in cur2:
-                    logger.info("[Codex][BrowserUse] 国家码已通过原生select切换成功：+%s", country_code)
-                    return True
-                logger.info("[Codex][BrowserUse] 原生select已选中 %r 但显示未变(%r)，尝试继续", picked, cur2)
+                return hits.length ? hits : null;
+            }""",
+            {"target": target, "names": [k for k in keywords if not k.startswith("+")]},
+        )
+        logger.info("[Codex][BrowserUse] 原生select匹配结果：%s", str(picked)[:300])
+        if picked:
+            time.sleep(1.0)
+            cur2 = _read_selected_country_text(page)
+            if target in cur2:
+                logger.info("[Codex][BrowserUse] 国家码已通过原生select切换成功：+%s (显示=%r)", country_code, cur2)
+                return True
+            # select 设值后 button 文本可能由 React 渲染，稍等再读
+            time.sleep(1.5)
+            cur2b = _read_selected_country_text(page)
+            if target in cur2b:
+                logger.info("[Codex][BrowserUse] 国家码已通过原生select切换成功(二次回读)：+%s (显示=%r)", country_code, cur2b)
+                return True
+            logger.warning("[Codex][BrowserUse] 原生select已选中 %r 但显示未变(%r)", picked[0].get("optText"), cur2b)
     except Exception as exc:
-        logger.debug("[Codex][BrowserUse] 原生select检测异常：%s", exc)
+        logger.warning("[Codex][BrowserUse] 原生select检测异常：%s", exc)
 
     # ---- B. React Aria combobox：真实点击打开 + 键盘导航 ----
     try:
@@ -1437,7 +1453,57 @@ def _split_country_and_local(phone: str) -> tuple[str, str]:
         return ("1", digits[1:])
     if digits.startswith("7") and len(digits) == 11:
         return ("7", digits[1:])
-    for cc in ("44", "86", "84", "81", "49", "33", "39", "62", "63", "91", "55", "52", "48", "31", "34", "46", "20", "27"):
+    # 覆盖 GrizzlySMS 主流国家（含南美/东南亚/非洲/中亚等测试目标）
+    for cc in (
+        "44", "86", "84", "81", "49", "33", "39", "62", "63", "91", "55", "52", "48", "31", "34", "46", "20", "27",
+        # 南美
+        "57",  # 哥伦比亚
+        "56",  # 智利
+        "54",  # 阿根廷
+        "51",  # 秘鲁
+        "58",  # 委内瑞拉
+        "598", # 乌拉圭
+        "595", # 巴拉圭
+        "591", # 玻利维亚
+        "593", # 厄瓜多尔
+        # 中亚/东欧
+        "7",   # 哈萨克/俄罗斯（11 位已单独处理）
+        "380", # 乌克兰
+        "373", # 摩尔多瓦
+        "374", # 亚美尼亚
+        "995", # 格鲁吉亚
+        "992", # 塔吉克斯坦
+        "996", # 吉尔吉斯
+        "998", # 乌兹别克
+        # 亚洲
+        "66",  # 泰国
+        "60",  # 马来西亚
+        "95",  # 缅甸
+        "856", # 老挝
+        "972", # 以色列
+        # 非洲
+        "254", # 肯尼亚
+        "27",  # 南非
+        "212", # 摩洛哥
+        "20",  # 埃及
+        # 欧洲
+        "45",  # 丹麦
+        "47",  # 挪威
+        "351", # 葡萄牙
+        "358", # 芬兰
+        "371", # 拉脱维亚
+        "370", # 立陶宛
+        "421", # 斯洛伐克
+        "420", # 捷克
+        "359", # 保加利亚
+        "40",  # 罗马尼亚
+        "504", # 洪都拉斯
+        "506", # 哥斯达黎加
+        "852", # 香港
+        "886", # 台湾
+        "65",  # 新加坡
+        "880", # 孟加拉
+    ):
         if digits.startswith(cc) and len(digits) > len(cc) + 4:
             return (cc, digits[len(cc):])
     if len(digits) >= 10:
