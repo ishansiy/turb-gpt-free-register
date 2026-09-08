@@ -2179,6 +2179,21 @@ def _complete_profile_page(page, name: str, birthday: str, timeout: int = 60) ->
             logger.info("[BrowserUse] 资料页提交后已检测到 accessToken")
             return True
 
+        # MFA 挑战页诊断转储（仅一次），收集页面结构供后续自动化
+        if "mfa-challenge" in url and not globals().get("_MFA_DUMPED", False):
+            globals()["_MFA_DUMPED"] = True
+            try:
+                mfa_dump = page.evaluate(r'''() => {
+                  const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+                  const btns = [...document.querySelectorAll('button, [role=button], a')].filter(visible).map(el => (el.textContent||'').trim().slice(0,60)).filter(Boolean);
+                  const inputs = [...document.querySelectorAll('input, select')].filter(visible).map(el => ({name: el.name||'', id: el.id||'', type: el.type||'', placeholder: el.placeholder||'', aria: el.getAttribute('aria-label')||''}));
+                  const lists = [...document.querySelectorAll('[role=listbox] [role=option], li[role=option], [data-test]')].filter(visible).map(el => (el.textContent||'').trim().slice(0,80)).filter(Boolean);
+                  return {url: location.href, title: document.title, buttons: btns.slice(0,20), inputs: inputs.slice(0,10), options: lists.slice(0,20), body_text: (document.body.innerText||'').slice(0,1500)};
+                }''')
+                logger.warning("[BrowserUse][MFA-DUMP] %s", str(mfa_dump)[:2800])
+            except Exception as _mfa_exc:
+                logger.warning("[BrowserUse][MFA-DUMP] failed: %s", _mfa_exc)
+
         # 使用 evaluate 精准探测页面是否含有 profile 字段或表单
         try:
             looks_profile = page.evaluate(r'''() => {
