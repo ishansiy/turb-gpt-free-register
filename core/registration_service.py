@@ -167,6 +167,8 @@ def _should_disable_failed_registration_email(error: object) -> bool:
         or "邮箱提交后进入登录密码页" in text
         or "auth.openai.com/log-in/password" in text
         or "/log-in/password" in text
+        # OTP 静默拒绝（验证码正确但页面不跳转）＝ OpenAI 对该邮箱指纹定向风控，重试必然失败
+        or "邮箱验证码连续错误/过期" in text
     )
 
 
