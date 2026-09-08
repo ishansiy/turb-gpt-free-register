@@ -2963,9 +2963,17 @@ def run_browser_use_registration(
         logger.debug("[BrowserUse] 失败详情", exc_info=True)
         try:
             from core.email_provider import release_email
+            # AT/session 超时属于 OpenAI 侧已消耗邮箱的失败（注册流程已走完邮箱+OTP），
+            # 无论 create_acknowledged 与否都标记 failed，避免释放后又被领取形成死循环。
+            err_text = f"{type(exc).__name__}: {exc}"
+            _at_timeout = (
+                "accessToken" in err_text
+                or "/api/auth/session" in err_text
+                or "session" in err_text.lower() and "超时" in err_text
+            )
             release_email(
                 email,
-                status="failed" if create_acknowledged else "available",
+                status="failed" if (create_acknowledged or _at_timeout) else "available",
                 note=f"BrowserUse注册失败: {str(exc)[:180]}",
             )
         except Exception:

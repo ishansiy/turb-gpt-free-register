@@ -149,11 +149,12 @@ def _is_final_session_access_token_timeout(error: object) -> bool:
     text = str(error or "")
     if not text:
         return False
-    return (
-        "等待 /api/auth/session accessToken 超时" in text
-        and "WARNING_BANNER" in text
-        and "'_http_status': 200" in text
-    )
+    if "等待 /api/auth/session accessToken 超时" not in text or "WARNING_BANNER" not in text:
+        return False
+    if "'_http_status': 200" in text:
+        return True
+    # mfa-challenge 页 session 返回无 accessToken 的 dict（AT 被风控拦截），同样应停用
+    return "mfa-challenge" in text
 
 
 def _should_disable_failed_registration_email(error: object) -> bool:
